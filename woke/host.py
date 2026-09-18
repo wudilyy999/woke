@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from woke.errors import AuthError, NotFound, SessionBusy, WokeError
+from woke.errors import AuthError, HostDown, NotFound, SessionBusy, WokeError
 from woke.events import Event
 from woke.mcp import McpHub
 from woke.model import Model, build_model
@@ -27,6 +27,7 @@ from woke.store import (
     release_lock,
     write_host_meta,
 )
+from woke.files import restore_files_after_cut
 
 
 class Host:
@@ -84,6 +85,7 @@ class Host:
         self,
         policy: Policy | None = None,
         on_event: Any = None,
+        on_delta: Any = None,
         depth: int = 0,
     ) -> Engine:
         registry = self.registry if depth == 0 else self.registry.child()
@@ -94,6 +96,7 @@ class Host:
             token_budget=self.token_budget,
             crash_after_tool_call=self.crash_after_tool_call,
             on_event=on_event,
+            on_delta=on_delta,
             registry=registry,
             depth=depth,
             spawn_child=self._spawn_agent if depth == 0 else None,
@@ -199,7 +202,7 @@ class Host:
     def fork_before_user_seq(self, source_id: str, user_seq: int) -> tuple[str, str]:
         """New session with events strictly before this user.message. Original untouched.
 
-        Returns (new_session_id, prefill_prompt). Does not revert workspace files.
+        Returns (new_session_id, prefill_prompt). Restores file edits after the cut.
         """
         source = self.store.read_session(source_id)
         if not source or source[0].kind != "session.created":
@@ -213,6 +216,7 @@ class Host:
                 cut = event.seq
                 break
         created = source[0]
+        restore_files_after_cut(Path(created.payload["workspace"]), source, cut)
         title = str(created.payload.get("title") or "session")
         new_id = self.create_session(
             str(created.payload["workspace"]),
@@ -275,7 +279,13 @@ class Host:
         self.get_session(session_id)
         return self.store.read_session(session_id, after=after)
 
-    def run_turn(self, session_id: str, text: str, yes: bool = False) -> TurnOutcome:
+    def run_turn(
+        self,
+        session_id: str,
+        text: str,
+        yes: bool = False,
+        on_delta: Any = None,
+    ) -> TurnOutcome:
         self.get_session(session_id)
         policy = parse_policy(yes) if yes else self.policy
         with self._lock_for(session_id):
@@ -283,7 +293,7 @@ class Host:
             if open_turn_id(events):
                 raise SessionBusy(f"session {session_id} already has an open turn")
             try:
-                return self._engine(policy=policy).start_turn(session_id, text)
+                return self._engine(policy=policy, on_delta=on_delta).start_turn(session_id, text)
             finally:
                 self.phase = ""
 
@@ -379,6 +389,101 @@ class Host:
         thread = threading.Thread(target=httpd.serve_forever, name="woke-host", daemon=True)
         thread.start()
         return self.port
+
+
+class HostClient:
+    """Client facade used when another process already owns the Host lock."""
+
+    def __init__(self, root: Path) -> None:
+        from woke.store import read_host_meta
+
+        meta = read_host_meta(root)
+        if meta is None:
+            raise HostDown(f"no host is running in {root}")
+        self.root = Path(root)
+        self.base = f"http://127.0.0.1:{meta['port']}"
+        self.token = read_root_meta(root)["token"]
+        self.phase = ""
+        self.token_budget = DEFAULT_BUDGET
+        self.mcp = type("McpState", (), {"servers": []})()
+        self.mcp_errors: list[str] = []
+
+    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        import urllib.request
+
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        request = urllib.request.Request(
+            self.base + path,
+            data=data,
+            method=method,
+            headers={"X-Woke-Token": self.token, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=600) as response:
+            raw = response.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+    def get_session(self, session_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/sessions/{session_id}")
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/sessions")["sessions"]
+
+    def list_root_sessions(self) -> list[dict[str, Any]]:
+        return list(reversed([item for item in self.list_sessions() if not item.get("parent_session_id")]))
+
+    def session_for_workspace(self, workspace: str) -> str:
+        path = str(Path(workspace).expanduser().resolve())
+        for item in self.list_root_sessions():
+            if item["workspace"] == path:
+                return item["id"]
+        return self.create_session(path)
+
+    def create_session(self, workspace: str, title: str = "", parent_session_id: str | None = None) -> str:
+        if parent_session_id:
+            raise WokeError("remote child sessions are unavailable")
+        return self._request("POST", "/sessions", {"workspace": workspace, "title": title})["id"]
+
+    def events(self, session_id: str, after: int = 0) -> list[Event]:
+        return [Event(**item) for item in self._request("GET", f"/sessions/{session_id}/events?after={after}")["events"]]
+
+    def run_turn(self, session_id: str, text: str, yes: bool = False, on_delta: Any = None) -> TurnOutcome:
+        data = self._request("POST", f"/sessions/{session_id}/turns", {"text": text, "yes": yes})
+        outcome = _outcome_from_json(data)
+        if on_delta:
+            for event in outcome.events:
+                if event.kind == "model.message" and event.payload.get("text"):
+                    on_delta(event.payload["text"])
+        return outcome
+
+    def decide_permission(self, session_id: str, call_id: str, decision: str, scope: str = "once") -> TurnOutcome:
+        return _outcome_from_json(
+            self._request(
+                "POST",
+                f"/sessions/{session_id}/permissions",
+                {"id": call_id, "decision": decision, "scope": scope},
+            )
+        )
+
+    def compact(self, session_id: str, force: bool = True) -> Event | None:
+        data = self._request("POST", f"/sessions/{session_id}/compact", {})
+        raw = data.get("event")
+        return Event(**raw) if raw else None
+
+    def fork_session(self, session_id: str) -> str:
+        raise WokeError("fork is unavailable while attached to a remote Host")
+
+    def rewind_targets(self, session_id: str) -> list[dict[str, Any]]:
+        events = self.events(session_id)
+        return [
+            {"seq": event.seq, "turn_id": event.turn_id, "text": str(event.payload.get("text") or "")[:80]}
+            for event in reversed([event for event in events if event.kind == "user.message"])
+        ]
+
+    def fork_before_user_seq(self, source_id: str, user_seq: int) -> tuple[str, str]:
+        raise WokeError("rewind is unavailable while attached to a remote Host")
+
+    def close(self) -> None:
+        return
 
 
 def _remap_compact_seq(payload: dict[str, Any], seq_map: dict[int, int]) -> dict[str, Any] | None:
@@ -509,4 +614,10 @@ def _outcome_json(outcome: TurnOutcome) -> dict[str, Any]:
     }
 
 
-
+def _outcome_from_json(data: dict[str, Any]) -> TurnOutcome:
+    return TurnOutcome(
+        status=str(data.get("status") or "failed"),
+        pending_call_id=data.get("pending_call_id"),
+        error=data.get("error"),
+        events=[Event(**item) for item in data.get("events") or []],
+    )

@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from woke.errors import SimulatedCrash
 from woke.events import Event
+from woke.files import expand_mentions, snapshot_before, unified_diff
 from woke.memory import load_briefing
 from woke.model import Model, ModelReply
 from woke.policy import Policy
@@ -43,6 +44,7 @@ MCP tools are named mcp__<server>__<tool>. spawn_agent runs a nested agent with 
 
 OnEvent = Callable[[Event], None]
 OnPhase = Callable[[str], None]
+OnDelta = Callable[[str], None]
 
 
 @dataclass
@@ -66,6 +68,7 @@ class Engine:
         depth: int = 0,
         spawn_child: Callable[..., tuple[bool, str]] | None = None,
         on_phase: OnPhase | None = None,
+        on_delta: OnDelta | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -80,6 +83,7 @@ class Engine:
         self.depth = depth
         self.spawn_child = spawn_child
         self.on_phase = on_phase
+        self.on_delta = on_delta
 
     def _phase(self, text: str) -> None:
         if self.on_phase:
@@ -116,7 +120,10 @@ class Engine:
             self.emit(
                 session_id,
                 "user.message",
-                {"text": text},
+                {
+                    "text": text,
+                    "attachments": expand_mentions(text, Path(workspace_of(self.store.read_session(session_id)))),
+                },
                 turn_id=turn_id,
                 run_id=run_id,
             )
@@ -273,7 +280,9 @@ class Engine:
             events = self.store.read_session(session_id)
             self._phase("waiting for model")
             try:
-                reply = self.model.complete(_with_system(events), self.registry.specs())
+                reply = self.model.complete(
+                    _with_system(events), self.registry.specs(), on_delta=self.on_delta
+                )
             except SimulatedCrash:
                 raise
             except Exception as exc:
@@ -346,10 +355,17 @@ class Engine:
             if call_id in done:
                 continue
             if call_id not in written_calls:
+                call_payload: dict[str, Any] = {
+                    "id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                }
+                if name in {"write_file", "str_replace"}:
+                    call_payload["before"] = snapshot_before(workspace, str(arguments["path"]))
                 self.emit(
                     session_id,
                     "tool.call",
-                    {"id": call_id, "name": name, "arguments": arguments},
+                    call_payload,
                     turn_id=turn_id,
                     run_id=run_id,
                 )
@@ -429,6 +445,15 @@ class Engine:
                 payload["truncated"] = True
             if not ok:
                 payload["error"] = output
+            if name in {"write_file", "str_replace"} and ok:
+                before = next(
+                    event.payload.get("before")
+                    for event in reversed(self.store.read_session(session_id))
+                    if event.kind == "tool.call" and event.payload.get("id") == call_id
+                )
+                payload["diff"] = unified_diff(
+                    str(arguments["path"]), before, snapshot_before(workspace, str(arguments["path"]))
+                )
             self.emit(session_id, "tool.result", payload, turn_id=turn_id, run_id=run_id)
         return None
 

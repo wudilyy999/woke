@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from woke.events import Event
-from woke.host import Host
+from woke.host import Host, HostClient
+from woke.errors import HostLocked
 from woke.model import active_model_label, build_model
 from woke.policy import AutoAllow, GradedPolicy, WaitUser
 from woke.projection import estimate_tokens, pending_permission_id, project_messages
@@ -402,6 +403,7 @@ class Tui:
         self.error: str | None = None
         self.help = False
         self.notice: str | None = None
+        self.live_text = ""
         self.picker: str | None = None  # slash | models | workspace | permission
         self.menu_index = 0
         self.tick = 0
@@ -422,7 +424,14 @@ class Tui:
     def send(self, text: str) -> None:
         if self.busy or not text.strip():
             return
-        self._run_bg("waiting for model", lambda: self.host.run_turn(self.session_id, text))
+        self.live_text = ""
+        self._run_bg(
+            "waiting for model",
+            lambda: self.host.run_turn(self.session_id, text, on_delta=self._append_delta),
+        )
+
+    def _append_delta(self, text: str) -> None:
+        self.live_text += text
 
     def _run_bg(self, phase: str, fn: Any) -> None:
         if self.busy:
@@ -918,6 +927,8 @@ class Tui:
             rows.append(("ok", self.notice))
         if self.error:
             rows.append(("err", self.error))
+        if self.busy and self.live_text:
+            rows.append(("default", self.live_text))
 
         visible = rows
         if len(visible) > trans_h:
@@ -1057,7 +1068,17 @@ def run_tui(root: Path, workspace: str, yes: bool = False, model_id: str | None 
         from woke.model import ReactiveModel
 
         model = ReactiveModel("hello")
-    with Host(root, model=model, policy=policy) as host:
-        session_id = host.create_session(workspace)
+    try:
+        host: Host | HostClient = Host(root, model=model, policy=policy)
+        owned = True
+        host.serve_background()
+    except HostLocked:
+        host = HostClient(root)
+        owned = False
+    try:
+        session_id = host.session_for_workspace(workspace)
         Tui(host, session_id, yes=yes, model_id=model_id).run()
+    finally:
+        if owned:
+            host.close()
     return 0

@@ -42,7 +42,10 @@ def project_messages(events: list[Event], prune_tools: bool = True) -> list[dict
 
     for event in visible:
         if event.kind == "user.message":
-            messages.append({"role": "user", "content": event.payload["text"]})
+            content = event.payload["text"]
+            for attachment in event.payload.get("attachments") or []:
+                content += f"\n\n@{attachment['path']}\n```\n{attachment['content']}\n```"
+            messages.append({"role": "user", "content": content})
         elif event.kind == "model.message":
             msg: dict[str, Any] = {
                 "role": "assistant",

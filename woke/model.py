@@ -26,8 +26,16 @@ class ModelReply:
     tool_calls: list[ToolCall] = field(default_factory=list)
 
 
+OnDelta = Callable[[str], None]
+
+
 class Model(Protocol):
-    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelReply: ...
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        on_delta: OnDelta | None = None,
+    ) -> ModelReply: ...
 
     def summarize(self, text: str) -> str: ...
 
@@ -40,12 +48,20 @@ class ScriptModel:
         self.calls: list[list[dict[str, Any]]] = []
         self.summaries: list[str] = []
 
-    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelReply:
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        on_delta: OnDelta | None = None,
+    ) -> ModelReply:
         self.calls.append(messages)
         if not self.replies:
             return ModelReply(text="(script exhausted)")
         reply = self.replies.pop(0)
-        return reply(messages) if callable(reply) else reply
+        result = reply(messages) if callable(reply) else reply
+        if on_delta and result.text:
+            on_delta(result.text)
+        return result
 
     def summarize(self, text: str) -> str:
         self.summaries.append(text)
@@ -58,11 +74,22 @@ class ReactiveModel:
     def __init__(self, name: str) -> None:
         self.name = name
 
-    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelReply:
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        on_delta: OnDelta | None = None,
+    ) -> ModelReply:
         if self.name == "hello":
-            return ModelReply(text="hello from woke")
+            reply = ModelReply(text="hello from woke")
+            if on_delta:
+                on_delta(reply.text)
+            return reply
         if _last_tool(messages):
-            return ModelReply(text="finished")
+            reply = ModelReply(text="finished")
+            if on_delta:
+                on_delta(reply.text)
+            return reply
         if self.name == "write_then_done":
             return ModelReply(
                 text="",
@@ -96,7 +123,10 @@ class ReactiveModel:
                     )
                 ],
             )
-        return ModelReply(text="hello from woke")
+        reply = ModelReply(text="hello from woke")
+        if on_delta:
+            on_delta(reply.text)
+        return reply
 
     def summarize(self, text: str) -> str:
         return f"[summary {len(text)} chars]"
@@ -115,31 +145,21 @@ class OpenAICompatModel:
         self.model = model
         self.base_url = base_url.rstrip("/")
 
-    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelReply:
-        body: dict[str, Any] = {"model": self.model, "messages": messages}
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        on_delta: OnDelta | None = None,
+    ) -> ModelReply:
+        body: dict[str, Any] = {"model": self.model, "messages": messages, "stream": True}
         if tools:
             body["tools"] = tools
-        data = self._post("/chat/completions", body)
-        choice = (data.get("choices") or [{}])[0].get("message") or {}
-        calls = []
-        for raw in choice.get("tool_calls") or []:
-            fn = raw.get("function") or {}
-            arguments = fn.get("arguments") or "{}"
-            if isinstance(arguments, str):
-                try:
-                    parsed = json.loads(arguments)
-                except json.JSONDecodeError:
-                    parsed = {}
-            else:
-                parsed = arguments if isinstance(arguments, dict) else {}
-            calls.append(
-                ToolCall(
-                    id=str(raw.get("id") or f"call-{len(calls)+1}"),
-                    name=str(fn.get("name") or ""),
-                    arguments=parsed,
-                )
-            )
-        return ModelReply(text=choice.get("content") or "", tool_calls=calls)
+        try:
+            return self._stream("/chat/completions", body, on_delta)
+        except ModelError:
+            body.pop("stream", None)
+            data = self._post("/chat/completions", body)
+            return self._parse_message((data.get("choices") or [{}])[0].get("message") or {}, on_delta)
 
     def summarize(self, text: str) -> str:
         reply = self.complete(
@@ -184,6 +204,95 @@ class OpenAICompatModel:
                     raise last_error from exc
             time.sleep(0.4 * (2**attempt))
         raise last_error or ModelError("model request failed")
+
+    def _parse_message(self, choice: dict[str, Any], on_delta: OnDelta | None) -> ModelReply:
+        calls = []
+        for raw in choice.get("tool_calls") or []:
+            fn = raw.get("function") or {}
+            arguments = fn.get("arguments") or "{}"
+            if isinstance(arguments, str):
+                try:
+                    parsed = json.loads(arguments)
+                except json.JSONDecodeError:
+                    parsed = {}
+            else:
+                parsed = arguments if isinstance(arguments, dict) else {}
+            calls.append(
+                ToolCall(
+                    id=str(raw.get("id") or f"call-{len(calls)+1}"),
+                    name=str(fn.get("name") or ""),
+                    arguments=parsed,
+                )
+            )
+        text = choice.get("content") or ""
+        if on_delta and text:
+            on_delta(text)
+        return ModelReply(text=text, tool_calls=calls)
+
+    def _stream(self, path: str, body: dict[str, Any], on_delta: OnDelta | None) -> ModelReply:
+        payload = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            self.base_url + path,
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": "text/event-stream",
+            },
+        )
+        text = ""
+        tools: dict[int, dict[str, str]] = {}
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                while True:
+                    raw = resp.readline()
+                    if not raw:
+                        break
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = ((chunk.get("choices") or [{}])[0].get("delta") or {})
+                    piece = delta.get("content") or ""
+                    if piece:
+                        text += piece
+                        if on_delta:
+                            on_delta(piece)
+                    for tc in delta.get("tool_calls") or []:
+                        idx = int(tc.get("index") or 0)
+                        slot = tools.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                        if tc.get("id"):
+                            slot["id"] = str(tc["id"])
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] += str(fn["name"])
+                        if fn.get("arguments"):
+                            slot["arguments"] += str(fn["arguments"])
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise ModelError(f"model HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise ModelError(f"model transport: {exc.reason}") from exc
+        calls = []
+        for idx in sorted(tools):
+            slot = tools[idx]
+            try:
+                parsed = json.loads(slot["arguments"] or "{}")
+            except json.JSONDecodeError:
+                parsed = {}
+            if not isinstance(parsed, dict):
+                parsed = {}
+            calls.append(
+                ToolCall(id=slot["id"] or f"call-{idx+1}", name=slot["name"], arguments=parsed)
+            )
+        return ModelReply(text=text, tool_calls=calls)
 
 
 def build_model(model_id: str | None = None) -> Model:
