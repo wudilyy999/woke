@@ -1078,7 +1078,7 @@ def run_tui(root: Path, workspace: str, yes: bool = False, model_id: str | None 
         host = HostClient(root)
         owned = False
     try:
-        session_id = host.session_for_workspace(workspace)
+        session_id = host.create_session(workspace)
         Tui(host, session_id, yes=yes, model_id=model_id).run()
     finally:
         if owned:
