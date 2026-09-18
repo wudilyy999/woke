@@ -2,7 +2,7 @@
 
 A small **event-sourced coding-agent runtime**. The append-only log is the only fact; the next prompt, the CLI, and crash recovery are projections of that log.
 
-Inspired by [Apache Maka](https://github.com/apache/maka)'s published "log is the runtime" thesis. **This is original code**, not a rename of Maka, and not an Apache project. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the contract and the differences.
+Inspired by [Apache Maka](https://github.com/apache/maka)'s published "log is the runtime" thesis. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the runtime contract.
 
 ## Requirements
 
@@ -68,6 +68,4 @@ The suite covers: closed event schema, path containment, a full fake-model turn,
 
 ## License
 
-MIT. Maka is Apache-2.0; none of its source is included here.
-
-Do not commit API keys, `~/.woke/`, or `~/.kimi-code/`.
+[MIT](./LICENSE).
