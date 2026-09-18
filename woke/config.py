@@ -46,12 +46,6 @@ class AppConfig:
         return provider, spec
 
 
-# Kimi Code ids that the local OpenAI proxy exposes under a slightly different name.
-MODEL_ALIASES = {
-    "deepseek-v4.1-flash": "deepseek-v4-flash",
-}
-
-
 def kimi_config_path() -> Path:
     return Path.home() / ".kimi-code" / "config.toml"
 
@@ -61,6 +55,8 @@ def woke_config_path() -> Path:
 
 
 def load_config(path: Path | None = None) -> AppConfig:
+    if path is None and os.environ.get("WOKE_CONFIG"):
+        path = Path(os.environ["WOKE_CONFIG"]).expanduser()
     for candidate in (
         [path] if path is not None else [woke_config_path(), kimi_config_path()]
     ):

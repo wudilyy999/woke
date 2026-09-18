@@ -311,10 +311,7 @@ def build_model(model_id: str | None = None) -> Model:
         provider, spec = cfg.resolve(model_id)
         if not provider.api_key:
             raise RuntimeError(f"provider {provider.name} has no api_key")
-        from woke.config import MODEL_ALIASES
-
-        wire_model = MODEL_ALIASES.get(spec.model, spec.model)
-        return OpenAICompatModel(api_key=provider.api_key, model=wire_model, base_url=provider.base_url)
+        return OpenAICompatModel(api_key=provider.api_key, model=spec.model, base_url=provider.base_url)
     raise RuntimeError("set WOKE_API_KEY or add ~/.woke/config.toml / ~/.kimi-code/config.toml")
 
 
@@ -342,6 +339,5 @@ def _last_tool(messages: list[dict[str, Any]]) -> bool:
         if message.get("role") in {"user", "assistant"}:
             return False
     return False
-
 
 

@@ -210,6 +210,8 @@ def transcript_lines(events: list[Event], width: int) -> list[tuple[str, str]]:
             add("dim", f"  compacted seq {event.payload.get('from_seq')}-{event.payload.get('to_seq')}")
         elif event.kind == "turn.terminated" and event.payload.get("status") != "completed":
             add("err", f"  turn {event.payload.get('status')}")
+            if event.payload.get("error"):
+                add("err", str(event.payload["error"]))
     return rows
 
 

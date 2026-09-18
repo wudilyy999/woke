@@ -32,6 +32,12 @@ def _event(seq: int, kind: str, payload: dict, turn: str = "t") -> Event:
 
 
 class TuiRenderTests(unittest.TestCase):
+    def test_failed_turn_shows_error(self) -> None:
+        rows = transcript_lines([
+            _event(1, "turn.terminated", {"status": "failed", "error": "model HTTP 404: model_not_found"})
+        ], 80)
+        self.assertIn(("err", "model HTTP 404: model_not_found"), rows)
+
     def test_welcome_looks_like_codex_card(self) -> None:
         lines = [text for _style, text in welcome_lines("gpt-4o-mini", "/Users/me/proj", 50)]
         joined = "\n".join(lines)
