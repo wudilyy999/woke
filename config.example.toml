@@ -1,0 +1,15 @@
+# Copy to ~/.woke/config.toml (takes precedence over ~/.kimi-code/config.toml).
+# Do not commit real api_key values.
+
+default_model = "openai/gpt-4o-mini"
+
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+type = "openai"
+api_key = "YOUR_API_KEY"
+
+[models."openai/gpt-4o-mini"]
+provider = "openai"
+model = "gpt-4o-mini"
+display_name = "gpt-4o-mini"
+max_context_size = 128000
