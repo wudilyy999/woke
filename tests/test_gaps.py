@@ -64,7 +64,7 @@ class GapTests(unittest.TestCase):
             self.assertIn("-old", result.payload["diff"])
             self.assertIn("+new", result.payload["diff"])
 
-    def test_rewind_restores_file_changes_after_cut(self) -> None:
+    def test_rewind_preserves_file_changes_after_cut(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "root"
             workspace = Path(tmp) / "workspace"
@@ -91,7 +91,7 @@ class GapTests(unittest.TestCase):
                 target = next(event for event in host.events(session) if event.kind == "user.message" and event.payload["text"] == "change")
                 self.assertEqual((workspace / "out.txt").read_text(encoding="utf-8"), "changed")
                 host.fork_before_user_seq(session, target.seq)
-            self.assertFalse((workspace / "out.txt").exists())
+            self.assertEqual((workspace / "out.txt").read_text(encoding="utf-8"), "changed")
 
     def test_existing_host_client_uses_host_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -27,7 +27,6 @@ from woke.store import (
     release_lock,
     write_host_meta,
 )
-from woke.files import restore_files_after_cut
 
 
 class Host:
@@ -202,7 +201,7 @@ class Host:
     def fork_before_user_seq(self, source_id: str, user_seq: int) -> tuple[str, str]:
         """New session with events strictly before this user.message. Original untouched.
 
-        Returns (new_session_id, prefill_prompt). Restores file edits after the cut.
+        Returns (new_session_id, prefill_prompt). Filesystem state is left to git.
         """
         source = self.store.read_session(source_id)
         if not source or source[0].kind != "session.created":
@@ -216,7 +215,6 @@ class Host:
                 cut = event.seq
                 break
         created = source[0]
-        restore_files_after_cut(Path(created.payload["workspace"]), source, cut)
         title = str(created.payload.get("title") or "session")
         new_id = self.create_session(
             str(created.payload["workspace"]),
@@ -439,9 +437,10 @@ class HostClient:
         return self.create_session(path)
 
     def create_session(self, workspace: str, title: str = "", parent_session_id: str | None = None) -> str:
+        body = {"workspace": workspace, "title": title}
         if parent_session_id:
-            raise WokeError("remote child sessions are unavailable")
-        return self._request("POST", "/sessions", {"workspace": workspace, "title": title})["id"]
+            body["parent_session_id"] = parent_session_id
+        return self._request("POST", "/sessions", body)["id"]
 
     def events(self, session_id: str, after: int = 0) -> list[Event]:
         return [Event(**item) for item in self._request("GET", f"/sessions/{session_id}/events?after={after}")["events"]]
@@ -538,6 +537,7 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
                     session_id = host.create_session(
                         str(body.get("workspace") or ""),
                         title=str(body.get("title") or ""),
+                        parent_session_id=str(body.get("parent_session_id") or "") or None,
                     )
                     return self._json(201, host.get_session(session_id))
                 if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "turns":
