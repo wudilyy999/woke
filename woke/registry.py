@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from woke.mcp import McpHub, McpTool
+from woke.sandbox import SandboxManager
 from woke.tools import DANGEROUS, TOOL_SPECS, execute as execute_builtin
 
 SPAWN_NAME = "spawn_agent"
@@ -40,9 +41,15 @@ class BoundTool:
 
 
 class ToolRegistry:
-    def __init__(self, hub: McpHub | None = None, allow_spawn: bool = True) -> None:
+    def __init__(
+        self,
+        hub: McpHub | None = None,
+        allow_spawn: bool = True,
+        sandbox: SandboxManager | None = None,
+    ) -> None:
         self.hub = hub or McpHub([])
         self.allow_spawn = allow_spawn
+        self.sandbox = sandbox
         self._spawn: Callable[..., tuple[bool, str]] | None = None
 
     def set_spawn(self, spawn: Callable[..., tuple[bool, str]] | None) -> None:
@@ -81,10 +88,10 @@ class ToolRegistry:
                 return True, self.hub.call(name, arguments)
             except Exception as exc:  # noqa: BLE001
                 return False, str(exc)
-        return execute_builtin(name, arguments, workspace)
+        return execute_builtin(name, arguments, workspace, sandbox=self.sandbox)
 
     def child(self) -> ToolRegistry:
-        child = ToolRegistry(hub=self.hub, allow_spawn=False)
+        child = ToolRegistry(hub=self.hub, allow_spawn=False, sandbox=self.sandbox)
         return child
 
 

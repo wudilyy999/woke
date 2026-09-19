@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from woke.errors import PathEscapes, ValidationError
+from woke.sandbox import SandboxManager, SandboxUnavailable
 
 DANGEROUS = frozenset({"write_file", "str_replace", "run_shell"})
 SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "__pycache__", ".woke"})
@@ -146,7 +147,12 @@ def contained_path(workspace: Path, rel: str) -> Path:
     return path
 
 
-def execute(name: str, arguments: dict[str, Any], workspace: Path) -> tuple[bool, str]:
+def execute(
+    name: str,
+    arguments: dict[str, Any],
+    workspace: Path,
+    sandbox: SandboxManager | None = None,
+) -> tuple[bool, str]:
     if not isinstance(arguments, dict):
         return False, "arguments must be an object"
     missing = [key for key in REQUIRED_ARGS.get(name, ()) if key not in arguments]
@@ -164,7 +170,7 @@ def execute(name: str, arguments: dict[str, Any], workspace: Path) -> tuple[bool
         if name == "grep":
             return True, _grep(workspace, arguments)
         if name == "run_shell":
-            return True, _run_shell(workspace, arguments)
+            return True, _run_shell(workspace, arguments, sandbox)
         if name == "memory_read":
             from woke.memory import read_memory
 
@@ -277,15 +283,21 @@ def _walk_files(root: Path) -> list[Path]:
     return out
 
 
-def _run_shell(workspace: Path, arguments: dict[str, Any]) -> str:
+def _run_shell(
+    workspace: Path,
+    arguments: dict[str, Any],
+    sandbox: SandboxManager | None,
+) -> str:
     command = str(arguments["command"]).strip()
     if not command:
         raise ValidationError("command is empty")
+    if sandbox is None:
+        raise SandboxUnavailable("sandbox is required for run_shell")
+    argv = sandbox.wrap_command(command, workspace, allow_write=True)
     try:
         completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=workspace.resolve(),
+            argv,
+            cwd=str(workspace.resolve()),
             capture_output=True,
             text=True,
             timeout=SHELL_TIMEOUT,

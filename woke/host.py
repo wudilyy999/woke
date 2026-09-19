@@ -18,6 +18,7 @@ from woke.policy import AutoAllow, Policy, WaitUser, parse_policy
 from woke.projection import last_model_message, open_run_id, open_turn_id, pending_permission_id
 from woke.registry import ToolRegistry
 from woke.runner import DEFAULT_BUDGET, Engine, TurnOutcome
+from woke.sandbox import SandboxManager
 from woke.store import (
     Store,
     acquire_lock,
@@ -54,9 +55,10 @@ class Host:
         self._httpd: ThreadingHTTPServer | None = None
         self.port: int | None = None
         self._closed = False
-        self.mcp = McpHub.load(self.root)
+        self.sandbox = SandboxManager()
+        self.mcp = McpHub.load(self.root, sandbox=self.sandbox, workspace=self.root)
         self.mcp_errors = self.mcp.start()
-        self.registry = ToolRegistry(hub=self.mcp, allow_spawn=True)
+        self.registry = ToolRegistry(hub=self.mcp, allow_spawn=True, sandbox=self.sandbox)
         self.phase = ""
         self.recover_all()
 

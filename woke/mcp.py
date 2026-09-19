@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from woke.sandbox import SandboxManager
+
 
 class McpError(RuntimeError):
     pass
@@ -28,11 +30,21 @@ class McpTool:
 
 
 class McpServer:
-    def __init__(self, name: str, command: str, args: list[str], env: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        command: str,
+        args: list[str],
+        env: dict[str, str] | None = None,
+        sandbox: SandboxManager | None = None,
+        workspace: Path | None = None,
+    ) -> None:
         self.name = name
         self.command = command
         self.args = args
         self.env = env or {}
+        self.sandbox = sandbox
+        self.workspace = workspace
         self._proc: subprocess.Popen[bytes] | None = None
         self._lock = threading.Lock()
         self._next_id = 1
@@ -41,8 +53,21 @@ class McpServer:
     def start(self) -> None:
         env = os.environ.copy()
         env.update(self.env)
+        argv = [self.command, *self.args]
+        if self.sandbox is not None and self.workspace is not None:
+            extra = []
+            for arg in self.args:
+                candidate = Path(arg)
+                if candidate.exists():
+                    extra.append(candidate.parent)
+            argv = self.sandbox.wrap_argv(
+                argv,
+                self.workspace,
+                allow_write=True,
+                extra_read_roots=extra or None,
+            )
         self._proc = subprocess.Popen(
-            [self.command, *self.args],
+            argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -131,7 +156,7 @@ class McpHub:
         self.servers = servers
 
     @classmethod
-    def load(cls, root: Path) -> McpHub:
+    def load(cls, root: Path, sandbox: SandboxManager | None = None, workspace: Path | None = None) -> McpHub:
         path = Path(root) / "mcp.json"
         if not path.exists():
             return cls([])
@@ -153,6 +178,8 @@ class McpHub:
                         command=str(spec["command"]),
                         args=[str(a) for a in args],
                         env={str(k): str(v) for k, v in dict(env).items()},
+                        sandbox=sandbox,
+                        workspace=workspace,
                     )
                 )
         return cls(servers)
