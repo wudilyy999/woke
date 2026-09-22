@@ -77,6 +77,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status")
     sub.add_parser("models", help="list models from Kimi Code / woke config")
     sub.add_parser("tui", help="Codex-style interactive terminal")
+    acp_p = sub.add_parser("acp", help="speak Agent Client Protocol on stdio for editors")
+    acp_p.add_argument("--workspace", type=Path, default=None)
 
     args = parser.parse_args(argv)
     launch_cwd = Path.cwd().resolve()
@@ -119,6 +121,12 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_status(root)
         if args.cmd == "models":
             return _cmd_models()
+        if args.cmd == "acp":
+            from woke.acp import run_acp
+
+            init_root(root)
+            workspace = (args.workspace or workspace_hint).expanduser().resolve()
+            return run_acp(root, workspace)
         if args.cmd == "tui":
             from woke.tui import run_tui
 

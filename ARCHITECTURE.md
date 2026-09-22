@@ -150,6 +150,14 @@ Approved calls of one model reply are dispatched together. A batch made only of 
 
 `woke` with no subcommand opens a Codex-style terminal: welcome card, scrolling transcript, bottom `›` composer, cyan status line, magenta brand, slash commands (`/help` `/quit` `/clear` `/yes` `/compact`). Colors follow Codex's published TUI style notes. The TUI is a client of Host; it does not own the log.
 
+## ACP
+
+`woke acp` speaks Agent Client Protocol on stdio, so Zed, Neovim and other ACP clients can drive a session without the terminal UI. JSON-RPC 2.0, one message per line: `initialize` advertises `loadSession` plus image and embedded-context prompts, `session/new` maps a client `cwd` to a Host session, `session/prompt` runs one turn and answers with a stop reason, and `session/load` replays a session as updates.
+
+While the turn runs, the agent streams `session/update` notifications: model text as `agent_message_chunk`, tool work as `tool_call` and `tool_call_update`, and `todo_write` as a `plan`. Dangerous tools never auto-allow: the turn thread blocks on `session/request_permission`, which the client answers with `allow_once`, `allow_always` or `reject_once`. Because the turn runs on a worker thread, `session/cancel` is read while the turn is still open.
+
+Prompt images arrive as base64 parts, so the agent stores them under `.woke/attachments/` and passes the workspace-relative path to the normal image path in the turn pipeline.
+
 ## Out of scope
 
 No Electron, peer mesh, computer-use, eval harness, or filesystem rollback. `replay <seq>` is still a natural later feature.

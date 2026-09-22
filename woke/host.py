@@ -336,9 +336,13 @@ class Host:
         on_tool_output: Any = None,
         mode: str = "execute",
         images: list[str] | None = None,
+        policy: Any = None,
+        on_event: Any = None,
     ) -> TurnOutcome:
         self.get_session(session_id)
-        policy = AutoDeny() if mode == "plan" else (parse_policy(yes) if yes else self.policy)
+        turn_policy = policy or (
+            AutoDeny() if mode == "plan" else (parse_policy(yes) if yes else self.policy)
+        )
         with self._lock_for(session_id):
             events = self.store.read_session(session_id)
             if open_turn_id(events):
@@ -346,7 +350,8 @@ class Host:
             cancel = self._begin_turn(session_id)
             try:
                 return self._engine(
-                    policy=policy,
+                    policy=turn_policy,
+                    on_event=on_event,
                     on_delta=on_delta,
                     on_tool_output=on_tool_output,
                     should_cancel=cancel.is_set,

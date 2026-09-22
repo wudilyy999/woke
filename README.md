@@ -43,6 +43,18 @@ python3 -m woke --root /tmp/woke-demo host stop
 
 Editors and scripts drive the same Host: `woke send --background SESSION "..."` returns immediately, and `woke events SESSION --follow` prints the turn as it happens. In Python, `from woke.host import HostClient` gives you `start_turn`, `stream_events`, `decide_permission`, `cancel_turn` and `search_sessions`; every other language can POST `/sessions/{id}/turns` with `"background": true` and read `GET /sessions/{id}/events/stream` as server-sent events.
 
+Editors that speak Agent Client Protocol use `woke acp` instead, for example in Zed's settings:
+
+```json
+{
+  "agent_servers": {
+    "woke": { "command": "python3", "args": ["-m", "woke", "acp"] }
+  }
+}
+```
+
+The editor sends the workspace with `session/new`, receives streamed `session/update` messages, and answers `session/request_permission` before any write or shell call. `woke acp` uses the workspace state root owned by its own process, so stop the TUI for that workspace first.
+
 MCP servers (optional) go in `<root>/mcp.json`:
 
 ```json
@@ -90,7 +102,7 @@ Each hook receives the call as JSON on stdin and runs in the workspace.
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
 
-The suite covers: closed event schema, path containment, a full fake-model turn, crash-after-`tool.call` without re-execution (in-process and subprocess), compaction that shortens the prompt without deleting history, permission deny, Host HTTP token, MCP stdio echo, MCP resources/prompts over stdio and streamable HTTP, nested `spawn_agent`, parallel read/sub-agent batches, image attachments, cross-session search, hooks, and Codex-style TUI rendering.
+The suite covers: closed event schema, path containment, a full fake-model turn, crash-after-`tool.call` without re-execution (in-process and subprocess), compaction that shortens the prompt without deleting history, permission deny, Host HTTP token, SSE turn streaming, the ACP handshake with streamed tool calls and permission answers, MCP stdio echo, MCP resources/prompts over stdio and streamable HTTP, nested `spawn_agent`, parallel read/sub-agent batches, image attachments, cross-session search, hooks, and Codex-style TUI rendering.
 
 ## License
 
