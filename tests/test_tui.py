@@ -7,6 +7,7 @@ from woke.events import Event
 from woke.tui import (
     activity_line,
     composer_frame,
+    diff_rows,
     display_width,
     filter_slash,
     pad_width,
@@ -32,6 +33,32 @@ def _event(seq: int, kind: str, payload: dict, turn: str = "t") -> Event:
 
 
 class TuiRenderTests(unittest.TestCase):
+    def test_tool_result_renders_diff(self) -> None:
+        diff = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new"
+        rows = transcript_lines(
+            [
+                _event(
+                    1,
+                    "tool.result",
+                    {
+                        "id": "c1",
+                        "name": "write_file",
+                        "ok": True,
+                        "output": "wrote a.txt",
+                        "diff": diff,
+                    },
+                )
+            ],
+            60,
+        )
+        styles = {style for style, _text in rows}
+        self.assertIn("ok", styles)
+        self.assertIn("err", styles)
+        texts = [text for _style, text in rows]
+        self.assertTrue(any("-old" in text for text in texts))
+        self.assertTrue(any("+new" in text for text in texts))
+        self.assertEqual(diff_rows(diff)[3], ("err", "-old"))
+
     def test_failed_turn_shows_error(self) -> None:
         rows = transcript_lines([
             _event(1, "turn.terminated", {"status": "failed", "error": "model HTTP 404: model_not_found"})

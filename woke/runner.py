@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from woke.errors import SimulatedCrash
+from woke.errors import SimulatedCrash, ToolCancelled, TurnCancelled
 from woke.events import Event
 from woke.files import expand_mentions, snapshot_before, unified_diff
 from woke.memory import load_briefing
@@ -45,6 +45,11 @@ MCP tools are named mcp__<server>__<tool>. spawn_agent runs a nested agent with 
 OnEvent = Callable[[Event], None]
 OnPhase = Callable[[str], None]
 OnDelta = Callable[[str], None]
+OnToolOutput = Callable[[str], None]
+
+
+def _never_cancel() -> bool:
+    return False
 
 
 @dataclass
@@ -69,6 +74,8 @@ class Engine:
         spawn_child: Callable[..., tuple[bool, str]] | None = None,
         on_phase: OnPhase | None = None,
         on_delta: OnDelta | None = None,
+        on_tool_output: OnToolOutput | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -84,10 +91,18 @@ class Engine:
         self.spawn_child = spawn_child
         self.on_phase = on_phase
         self.on_delta = on_delta
+        self.on_tool_output = on_tool_output
+        self.should_cancel = should_cancel if should_cancel is not None else _never_cancel
 
     def _phase(self, text: str) -> None:
         if self.on_phase:
             self.on_phase(text)
+
+    def _model_delta(self, text: str) -> None:
+        if self.should_cancel():
+            raise TurnCancelled()
+        if self.on_delta:
+            self.on_delta(text)
 
     def emit(
         self,
@@ -273,6 +288,8 @@ class Engine:
 
     def _loop(self, session_id: str, turn_id: str, run_id: str) -> TurnOutcome:
         for _ in range(MAX_STEPS):
+            if self.should_cancel():
+                return self._cancel(session_id, turn_id, run_id)
             try:
                 self.compact(session_id, turn_id=turn_id, run_id=run_id)
             except Exception:
@@ -281,14 +298,18 @@ class Engine:
             self._phase("waiting for model")
             try:
                 reply = self.model.complete(
-                    _with_system(events), self.registry.specs(), on_delta=self.on_delta
+                    _with_system(events), self.registry.specs(), on_delta=self._model_delta
                 )
             except SimulatedCrash:
                 raise
+            except TurnCancelled:
+                return self._cancel(session_id, turn_id, run_id)
             except Exception as exc:
                 self._phase("")
                 return self._fail(session_id, turn_id, run_id, str(exc))
             self._phase("thinking")
+            if self.should_cancel():
+                return self._cancel(session_id, turn_id, run_id)
             if not reply.text and not reply.tool_calls:
                 reply = ModelReply(text="(empty model response)")
             self._emit_model(session_id, turn_id, run_id, reply)
@@ -327,6 +348,22 @@ class Engine:
             turn_id=turn_id,
         )
         return TurnOutcome(status="failed", error=error)
+
+    def _cancel(self, session_id: str, turn_id: str, run_id: str) -> TurnOutcome:
+        self.emit(
+            session_id,
+            "run.terminated",
+            {"status": "aborted", "error": "cancelled"},
+            turn_id=turn_id,
+            run_id=run_id,
+        )
+        self.emit(
+            session_id,
+            "turn.terminated",
+            {"status": "cancelled", "error": "cancelled"},
+            turn_id=turn_id,
+        )
+        return TurnOutcome(status="cancelled", error="cancelled")
 
     def _emit_model(self, session_id: str, turn_id: str, run_id: str, reply: ModelReply) -> None:
         payload: dict[str, Any] = {"text": reply.text or ""}
@@ -371,6 +408,21 @@ class Engine:
                 )
                 self._maybe_crash()
             events = self.store.read_session(session_id)
+            if self.should_cancel():
+                self.emit(
+                    session_id,
+                    "tool.result",
+                    {
+                        "id": call_id,
+                        "name": name,
+                        "ok": False,
+                        "output": "",
+                        "error": "cancelled",
+                    },
+                    turn_id=turn_id,
+                    run_id=run_id,
+                )
+                return self._cancel(session_id, turn_id, run_id)
             if self.registry.is_dangerous(name):
                 decided = None
                 requested = False
@@ -428,7 +480,15 @@ class Engine:
                 if name == SPAWN_NAME:
                     ok, output = self._spawn(session_id, arguments, workspace)
                 else:
-                    ok, output = self.registry.execute(name, arguments, workspace)
+                    ok, output = self.registry.execute(
+                        name,
+                        arguments,
+                        workspace,
+                        on_output=self.on_tool_output,
+                        should_cancel=self.should_cancel,
+                    )
+            except ToolCancelled:
+                ok, output = False, "cancelled"
             except SimulatedCrash:
                 raise
             except Exception as exc:
@@ -455,6 +515,8 @@ class Engine:
                     str(arguments["path"]), before, snapshot_before(workspace, str(arguments["path"]))
                 )
             self.emit(session_id, "tool.result", payload, turn_id=turn_id, run_id=run_id)
+            if self.should_cancel():
+                return self._cancel(session_id, turn_id, run_id)
         return None
 
     def _spawn(self, parent_id: str, arguments: dict[str, Any], workspace: Path) -> tuple[bool, str]:

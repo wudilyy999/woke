@@ -52,6 +52,8 @@ class Host:
         self.crash_after_tool_call = crash_after_tool_call
         self._session_locks: dict[str, threading.Lock] = {}
         self._meta_lock = threading.Lock()
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._active_turns: set[str] = set()
         self._httpd: ThreadingHTTPServer | None = None
         self.port: int | None = None
         self._closed = False
@@ -87,6 +89,8 @@ class Host:
         policy: Policy | None = None,
         on_event: Any = None,
         on_delta: Any = None,
+        on_tool_output: Any = None,
+        should_cancel: Any = None,
         depth: int = 0,
     ) -> Engine:
         registry = self.registry if depth == 0 else self.registry.child()
@@ -98,6 +102,8 @@ class Host:
             crash_after_tool_call=self.crash_after_tool_call,
             on_event=on_event,
             on_delta=on_delta,
+            on_tool_output=on_tool_output,
+            should_cancel=should_cancel,
             registry=registry,
             depth=depth,
             spawn_child=self._spawn_agent if depth == 0 else None,
@@ -136,6 +142,18 @@ class Host:
                 lock = threading.Lock()
                 self._session_locks[session_id] = lock
             return lock
+
+    def _begin_turn(self, session_id: str) -> threading.Event:
+        cancel = threading.Event()
+        with self._meta_lock:
+            self._cancel_events[session_id] = cancel
+            self._active_turns.add(session_id)
+        return cancel
+
+    def _end_turn(self, session_id: str) -> None:
+        with self._meta_lock:
+            self._cancel_events.pop(session_id, None)
+            self._active_turns.discard(session_id)
 
     def create_session(
         self,
@@ -285,6 +303,7 @@ class Host:
         text: str,
         yes: bool = False,
         on_delta: Any = None,
+        on_tool_output: Any = None,
     ) -> TurnOutcome:
         self.get_session(session_id)
         policy = parse_policy(yes) if yes else self.policy
@@ -292,9 +311,16 @@ class Host:
             events = self.store.read_session(session_id)
             if open_turn_id(events):
                 raise SessionBusy(f"session {session_id} already has an open turn")
+            cancel = self._begin_turn(session_id)
             try:
-                return self._engine(policy=policy, on_delta=on_delta).start_turn(session_id, text)
+                return self._engine(
+                    policy=policy,
+                    on_delta=on_delta,
+                    on_tool_output=on_tool_output,
+                    should_cancel=cancel.is_set,
+                ).start_turn(session_id, text)
             finally:
+                self._end_turn(session_id)
                 self.phase = ""
 
     def decide_permission(
@@ -324,24 +350,65 @@ class Host:
             for event in events:
                 if event.kind == "permission.requested" and event.payload.get("id") == call_id:
                     name = str(event.payload.get("name") or "")
-            engine = self._engine()
-            engine.emit(
-                session_id,
-                "permission.decided",
-                {
-                    "id": call_id,
-                    "decision": decision,
-                    "source": "user",
-                    "name": name,
-                    "scope": scope if decision == "allow" else "once",
-                },
-                turn_id=turn_id,
-                run_id=run_id,
-            )
+            cancel = self._begin_turn(session_id)
             try:
+                engine = self._engine(should_cancel=cancel.is_set)
+                engine.emit(
+                    session_id,
+                    "permission.decided",
+                    {
+                        "id": call_id,
+                        "decision": decision,
+                        "source": "user",
+                        "name": name,
+                        "scope": scope if decision == "allow" else "once",
+                    },
+                    turn_id=turn_id,
+                    run_id=run_id,
+                )
                 return engine.continue_turn(session_id, turn_id, run_id)
             finally:
+                self._end_turn(session_id)
                 self.phase = ""
+
+    def cancel_turn(self, session_id: str) -> bool:
+        """Stop the open turn in this session. Returns False when no turn is open."""
+        self.get_session(session_id)
+        with self._meta_lock:
+            running = self._cancel_events.get(session_id) if session_id in self._active_turns else None
+        if running is not None:
+            running.set()
+            return True
+        with self._lock_for(session_id):
+            with self._meta_lock:
+                running = (
+                    self._cancel_events.get(session_id)
+                    if session_id in self._active_turns
+                    else None
+                )
+            if running is not None:
+                running.set()
+                return True
+            events = self.store.read_session(session_id)
+            turn_id = open_turn_id(events)
+            if turn_id is None:
+                return False
+            run_id = open_run_id(events, turn_id)
+            if run_id is not None:
+                self.store.append(
+                    session_id,
+                    "run.terminated",
+                    {"status": "aborted", "error": "cancelled"},
+                    turn_id=turn_id,
+                    run_id=run_id,
+                )
+            self.store.append(
+                session_id,
+                "turn.terminated",
+                {"status": "cancelled", "error": "cancelled"},
+                turn_id=turn_id,
+            )
+            return True
 
     def compact(self, session_id: str, force: bool = True) -> Event | None:
         self.get_session(session_id)
@@ -447,7 +514,14 @@ class HostClient:
     def events(self, session_id: str, after: int = 0) -> list[Event]:
         return [Event(**item) for item in self._request("GET", f"/sessions/{session_id}/events?after={after}")["events"]]
 
-    def run_turn(self, session_id: str, text: str, yes: bool = False, on_delta: Any = None) -> TurnOutcome:
+    def run_turn(
+        self,
+        session_id: str,
+        text: str,
+        yes: bool = False,
+        on_delta: Any = None,
+        on_tool_output: Any = None,
+    ) -> TurnOutcome:
         data = self._request("POST", f"/sessions/{session_id}/turns", {"text": text, "yes": yes})
         outcome = _outcome_from_json(data)
         if on_delta:
@@ -455,6 +529,10 @@ class HostClient:
                 if event.kind == "model.message" and event.payload.get("text"):
                     on_delta(event.payload["text"])
         return outcome
+
+    def cancel_turn(self, session_id: str) -> bool:
+        data = self._request("POST", f"/sessions/{session_id}/cancel", {})
+        return bool(data.get("cancelled"))
 
     def decide_permission(self, session_id: str, call_id: str, decision: str, scope: str = "once") -> TurnOutcome:
         return _outcome_from_json(
@@ -557,6 +635,8 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
                 if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "compact":
                     event = host.compact(parts[1], force=True)
                     return self._json(200, {"event": None if event is None else event.to_dict()})
+                if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "cancel":
+                    return self._json(200, {"cancelled": host.cancel_turn(parts[1])})
                 self._json(404, {"error": "not found"})
             except Exception as exc:
                 self._handle_error(exc)

@@ -1,26 +1,39 @@
 from __future__ import annotations
 
+import html
 import os
+import queue
 import re
 import subprocess
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from woke.errors import PathEscapes, ValidationError
+from woke.errors import PathEscapes, ToolCancelled, ValidationError
 from woke.sandbox import SandboxManager, SandboxUnavailable
 
-DANGEROUS = frozenset({"write_file", "str_replace", "run_shell"})
+DANGEROUS = frozenset({"write_file", "str_replace", "run_shell", "web_fetch", "web_search"})
 SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "__pycache__", ".woke"})
 OUTPUT_CAP = 100_000
 READ_MAX_BYTES = 1_000_000
 GREP_MAX_FILE_BYTES = 1_000_000
 SHELL_TIMEOUT = 30
+WEB_TIMEOUT = 20
+WEB_MAX_BYTES = 2_000_000
+WEB_USER_AGENT = "Mozilla/5.0 (compatible; woke/0.1)"
+SEARCH_URL = "https://lite.duckduckgo.com/lite/?q="
 REQUIRED_ARGS: dict[str, tuple[str, ...]] = {
     "read_file": ("path",),
     "write_file": ("path", "content"),
     "str_replace": ("path", "old", "new"),
     "grep": ("pattern",),
     "run_shell": ("command",),
+    "web_fetch": ("url",),
+    "web_search": ("query",),
     "memory_write": ("text",),
 }
 
@@ -102,7 +115,10 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "run_shell",
-            "description": "Run a shell command with cwd set to the workspace. Not a sandbox.",
+            "description": (
+                "Run a shell command with cwd set to the workspace. The command runs in a "
+                "platform sandbox that confines writes to the workspace and tmp directories."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"command": {"type": "string"}},
@@ -116,6 +132,33 @@ TOOL_SPECS: list[dict[str, Any]] = [
             "name": "memory_read",
             "description": "Read durable notes in .woke/memory.md.",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": "Fetch an http(s) URL and return its text content.",
+            "parameters": {
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web and return the top results with snippets.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "description": "Number of results, default 5"},
+                },
+                "required": ["query"],
+            },
         },
     },
     {
@@ -152,6 +195,8 @@ def execute(
     arguments: dict[str, Any],
     workspace: Path,
     sandbox: SandboxManager | None = None,
+    on_output: Callable[[str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> tuple[bool, str]:
     if not isinstance(arguments, dict):
         return False, "arguments must be an object"
@@ -170,7 +215,11 @@ def execute(
         if name == "grep":
             return True, _grep(workspace, arguments)
         if name == "run_shell":
-            return True, _run_shell(workspace, arguments, sandbox)
+            return True, _run_shell(workspace, arguments, sandbox, on_output, should_cancel)
+        if name == "web_fetch":
+            return True, _web_fetch(arguments)
+        if name == "web_search":
+            return True, _web_search(arguments)
         if name == "memory_read":
             from woke.memory import read_memory
 
@@ -287,6 +336,8 @@ def _run_shell(
     workspace: Path,
     arguments: dict[str, Any],
     sandbox: SandboxManager | None,
+    on_output: Callable[[str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> str:
     command = str(arguments["command"]).strip()
     if not command:
@@ -294,19 +345,128 @@ def _run_shell(
     if sandbox is None:
         raise SandboxUnavailable("sandbox is required for run_shell")
     argv = sandbox.wrap_command(command, workspace, allow_write=True)
+    proc = subprocess.Popen(
+        argv,
+        cwd=str(workspace.resolve()),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def reader() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
+    chunks: list[str] = []
+    deadline = time.monotonic() + SHELL_TIMEOUT
     try:
-        completed = subprocess.run(
-            argv,
-            cwd=str(workspace.resolve()),
-            capture_output=True,
-            text=True,
-            timeout=SHELL_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise ValidationError(f"timed out after {SHELL_TIMEOUT}s") from exc
+        while True:
+            if should_cancel is not None and should_cancel():
+                raise ToolCancelled("cancelled")
+            if time.monotonic() > deadline:
+                raise ValidationError(f"timed out after {SHELL_TIMEOUT}s")
+            try:
+                line = lines.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if line is None:
+                break
+            chunks.append(line)
+            if on_output is not None:
+                on_output(line)
+        code = proc.wait()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
     parts = [
-        f"exit {completed.returncode}",
-        completed.stdout.rstrip(),
-        completed.stderr.rstrip(),
+        f"exit {code}",
+        "".join(chunks).rstrip(),
     ]
     return "\n".join(part for part in parts if part)
+
+
+def _http_get(url: str) -> tuple[str, str]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValidationError(f"unsupported url: {url}")
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": WEB_USER_AGENT, "Accept": "text/html,text/plain,*/*"},
+    )
+    with urllib.request.urlopen(request, timeout=WEB_TIMEOUT) as response:
+        raw = response.read(WEB_MAX_BYTES)
+        charset = response.headers.get_content_charset() or "utf-8"
+        final_url = response.geturl()
+    return raw.decode(charset, errors="replace"), final_url
+
+
+def _web_fetch(arguments: dict[str, Any]) -> str:
+    page, final_url = _http_get(str(arguments["url"]).strip())
+    body = _html_to_text(page)
+    return f"{final_url}\n\n{body}" if body else f"{final_url}\n\n(no text content)"
+
+
+def _web_search(arguments: dict[str, Any]) -> str:
+    query = str(arguments["query"]).strip()
+    if not query:
+        raise ValidationError("query is empty")
+    limit = int(arguments.get("limit") or 5)
+    page, _final_url = _http_get(SEARCH_URL + urllib.parse.quote(query))
+    results = _search_results(page)
+    if not results:
+        raise ValidationError("search returned no parseable results")
+    lines: list[str] = []
+    for index, (url, title, snippet) in enumerate(results[:limit], start=1):
+        lines.append(f"{index}. {title}\n{url}")
+        if snippet:
+            lines.append(f"   {snippet}")
+    return "\n".join(lines)
+
+
+def _search_results(page: str) -> list[tuple[str, str, str]]:
+    snippets = [
+        _html_to_text(block)
+        for block in re.findall(
+            r"<td[^>]*class=['\"]result-snippet['\"][^>]*>(.*?)</td>", page, re.S
+        )
+    ]
+    results: list[tuple[str, str, str]] = []
+    for tag, title in re.findall(
+        r"(<a[^>]*class=['\"]result-link['\"][^>]*>)(.*?)</a>", page, re.S
+    ):
+        href = re.search(r"href=['\"]([^'\"]+)['\"]", tag)
+        if href is None:
+            continue
+        index = len(results)
+        snippet = " ".join(snippets[index].split()) if index < len(snippets) else ""
+        results.append((_unwrap_search_url(href.group(1)), _html_to_text(title), snippet))
+    return results
+
+
+def _unwrap_search_url(href: str) -> str:
+    if href.startswith("//"):
+        href = "https:" + href
+    parsed = urllib.parse.urlparse(href)
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        target = urllib.parse.parse_qs(parsed.query).get("uddg")
+        if target:
+            return target[0]
+    return href
+
+
+def _html_to_text(markup: str) -> str:
+    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", markup)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(p|div|li|tr|h[1-6]|td|table)\s*>", "\n", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"[^\S\n]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()

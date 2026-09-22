@@ -63,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     dp = sub.add_parser("deny")
     dp.add_argument("session")
     dp.add_argument("call_id")
+    cp = sub.add_parser("cancel", help="cancel the open turn in a session")
+    cp.add_argument("session")
 
     sub.add_parser("status")
     sub.add_parser("models", help="list models from Kimi Code / woke config")
@@ -99,6 +101,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_decide(root, args.session, args.call_id, "allow")
         if args.cmd == "deny":
             return _cmd_decide(root, args.session, args.call_id, "deny")
+        if args.cmd == "cancel":
+            data = _client(root).post(f"/sessions/{args.session}/cancel", {})
+            print("cancelled" if data.get("cancelled") else "no open turn")
+            return 0
         if args.cmd == "status":
             return _cmd_status(root)
         if args.cmd == "models":

@@ -75,7 +75,14 @@ class ToolRegistry:
                 return tool.dangerous
         return True
 
-    def execute(self, name: str, arguments: dict[str, Any], workspace: Path) -> tuple[bool, str]:
+    def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        workspace: Path,
+        on_output: Callable[[str], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> tuple[bool, str]:
         if name == SPAWN_NAME:
             if self._spawn is None:
                 return False, "spawn_agent is not available"
@@ -88,7 +95,14 @@ class ToolRegistry:
                 return True, self.hub.call(name, arguments)
             except Exception as exc:  # noqa: BLE001
                 return False, str(exc)
-        return execute_builtin(name, arguments, workspace, sandbox=self.sandbox)
+        return execute_builtin(
+            name,
+            arguments,
+            workspace,
+            sandbox=self.sandbox,
+            on_output=on_output,
+            should_cancel=should_cancel,
+        )
 
     def child(self) -> ToolRegistry:
         child = ToolRegistry(hub=self.hub, allow_spawn=False, sandbox=self.sandbox)

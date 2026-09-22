@@ -174,6 +174,21 @@ def _short(value: Any, limit: int = 80) -> str:
     return text if display_width(text) <= limit else slice_width(text, max(1, limit - 1)) + "…"
 
 
+def diff_rows(diff: str, limit: int = 200) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for line in diff.splitlines()[:limit]:
+        if line.startswith(("+++", "---", "@@")):
+            style = "dim"
+        elif line.startswith("+"):
+            style = "ok"
+        elif line.startswith("-"):
+            style = "err"
+        else:
+            style = "default"
+        rows.append((style, line))
+    return rows
+
+
 def transcript_lines(events: list[Event], width: int) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
     inner = max(8, width - 2)
@@ -201,6 +216,10 @@ def transcript_lines(events: list[Event], width: int) -> list[tuple[str, str]]:
             ok = bool(event.payload.get("ok"))
             body = event.payload.get("error") if not ok else (event.payload.get("output") or "")
             add("ok" if ok else "err", "  " + _short(body, inner - 2))
+            diff = event.payload.get("diff")
+            if ok and diff:
+                for style, line in diff_rows(str(diff)):
+                    add(style, "  " + line)
         elif event.kind == "permission.requested":
             add("user", f"  approval needed: {event.payload.get('name')}")
         elif event.kind == "permission.decided":
@@ -406,6 +425,7 @@ class Tui:
         self.help = False
         self.notice: str | None = None
         self.live_text = ""
+        self.live_tool_output = ""
         self.picker: str | None = None  # slash | models | workspace | permission
         self.menu_index = 0
         self.tick = 0
@@ -427,13 +447,30 @@ class Tui:
         if self.busy or not text.strip():
             return
         self.live_text = ""
+        self.live_tool_output = ""
         self._run_bg(
             "waiting for model",
-            lambda: self.host.run_turn(self.session_id, text, on_delta=self._append_delta),
+            lambda: self.host.run_turn(
+                self.session_id,
+                text,
+                on_delta=self._append_delta,
+                on_tool_output=self._append_tool_output,
+            ),
         )
 
     def _append_delta(self, text: str) -> None:
         self.live_text += text
+
+    def _append_tool_output(self, text: str) -> None:
+        self.live_tool_output = (self.live_tool_output + text)[-4000:]
+
+    def _cancel_current(self) -> None:
+        try:
+            self.host.cancel_turn(self.session_id)
+        except Exception as exc:  # noqa: BLE001 — surface the failure in the UI
+            self.error = str(exc)
+            return
+        self.notice = "cancelling"
 
     def _run_bg(self, phase: str, fn: Any) -> None:
         if self.busy:
@@ -450,6 +487,8 @@ class Tui:
             finally:
                 self.busy = False
                 self.host.phase = ""
+                if self.notice == "cancelling":
+                    self.notice = None
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -752,6 +791,7 @@ class Tui:
                 return True
             if self.busy:
                 self._esc_armed = False
+                self._cancel_current()
                 return True
             if self._esc_armed:
                 self._esc_armed = False
@@ -929,6 +969,9 @@ class Tui:
             rows.append(("ok", self.notice))
         if self.error:
             rows.append(("err", self.error))
+        if self.busy and self.live_tool_output:
+            for line in self.live_tool_output.splitlines()[-8:]:
+                rows.append(("dim", line))
         if self.busy and self.live_text:
             rows.append(("default", self.live_text))
 

@@ -44,3 +44,11 @@ class ModelError(WokeError):
 
 class SimulatedCrash(BaseException):
     """Test-only crash after a committed tool.call. Not a subclass of Exception."""
+
+
+class TurnCancelled(BaseException):
+    """Raised while a turn runs after the user cancels it."""
+
+
+class ToolCancelled(BaseException):
+    """Raised when a running tool stops because the turn was cancelled."""

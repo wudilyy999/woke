@@ -6,7 +6,7 @@ from pathlib import Path
 
 from woke.host import Host, HostClient
 from woke.model import ModelReply, ScriptModel, ToolCall
-from woke.policy import AutoAllow
+from woke.policy import AutoAllow, WaitUser
 
 
 class GapTests(unittest.TestCase):
@@ -105,6 +105,33 @@ class GapTests(unittest.TestCase):
                 outcome = client.run_turn(session, "hello", yes=True)
                 self.assertEqual(outcome.status, "completed")
                 self.assertEqual(client.get_session(session)["id"], session)
+
+    def test_host_client_cancels_paused_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            model = ScriptModel(
+                [
+                    ModelReply(
+                        tool_calls=[
+                            ToolCall(
+                                id="c1",
+                                name="run_shell",
+                                arguments={"command": "echo hi"},
+                            )
+                        ]
+                    )
+                ]
+            )
+            with Host(root, model=model, policy=WaitUser()) as host:
+                host.serve_background()
+                client = HostClient(root)
+                session = client.create_session(str(workspace))
+                self.assertEqual(client.run_turn(session, "go").status, "paused")
+                self.assertTrue(client.cancel_turn(session))
+                self.assertIsNone(client.get_session(session)["open_turn"])
+                self.assertFalse(client.cancel_turn(session))
 
 
 if __name__ == "__main__":

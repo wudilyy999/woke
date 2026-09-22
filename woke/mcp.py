@@ -55,17 +55,7 @@ class McpServer:
         env.update(self.env)
         argv = [self.command, *self.args]
         if self.sandbox is not None and self.workspace is not None:
-            extra = []
-            for arg in self.args:
-                candidate = Path(arg)
-                if candidate.exists():
-                    extra.append(candidate.parent)
-            argv = self.sandbox.wrap_argv(
-                argv,
-                self.workspace,
-                allow_write=True,
-                extra_read_roots=extra or None,
-            )
+            argv = self.sandbox.wrap_argv(argv, self.workspace, allow_write=True)
         self._proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,

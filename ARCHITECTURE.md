@@ -106,7 +106,9 @@ Loopback HTTP, shared token (`X-Woke-Token` or `Authorization: Bearer`). JSON re
 
 ## Tools
 
-Workspace is a directory on the session, not a git worktree. Paths must stay inside it. Shell `cwd` is that directory; there is no OS sandbox. Search is stdlib, not ripgrep.
+Workspace is a directory on the session, not a git worktree. Paths must stay inside it. Shell `cwd` is that directory. `run_shell` and MCP servers launch under a platform sandbox: macOS uses `sandbox-exec` with a seatbelt policy, Linux uses `bwrap`. Writes are confined to the workspace plus the tmp directories; reads and network access stay open, so `git`, `pip` and `npm` keep working. A shell call fails when neither sandbox binary is present. Search is stdlib, not ripgrep.
+
+`run_shell` streams its output line by line to the caller and stops the process when the turn is cancelled. `web_fetch` returns the text of an http(s) URL; `web_search` queries DuckDuckGo lite and returns titles, links and snippets. Both network tools are dangerous, so they pass through the permission gate.
 
 ## MCP
 
