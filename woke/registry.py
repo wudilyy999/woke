@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from woke.mcp import McpHub, McpTool
+from woke.mcp import McpHub, McpServer, McpTool
 from woke.sandbox import SandboxManager
 from woke.tools import DANGEROUS, TOOL_SPECS, execute as execute_builtin
 
 SPAWN_NAME = "spawn_agent"
 TODO_NAME = "todo_write"
+RESOURCE_TOOL = "read_resource"
 MAX_SPAWN_DEPTH = 1
 
 SPAWN_SPEC: dict[str, Any] = {
@@ -94,6 +95,12 @@ class ToolRegistry:
         ]
         for tool in self.hub.tools():
             out.append(_mcp_bound(tool))
+        for server in self.hub.servers:
+            if not server.resources:
+                continue
+            if any(tool.server == server.name and tool.name == RESOURCE_TOOL for tool in server.tools):
+                continue
+            out.append(_resource_bound(server))
         out.append(BoundTool(name=TODO_NAME, spec=TODO_SPEC, dangerous=False, kind="builtin"))
         if self.allow_spawn:
             out.append(BoundTool(name=SPAWN_NAME, spec=SPAWN_SPEC, dangerous=True, kind="spawn"))
@@ -126,6 +133,12 @@ class ToolRegistry:
             except Exception as exc:  # noqa: BLE001 — surface any child failure as a tool error
                 return False, str(exc)
         if name.startswith("mcp__"):
+            if self.kind_of(name) == "mcp_resource":
+                server = name[len("mcp__") : -len(f"__{RESOURCE_TOOL}")]
+                try:
+                    return True, self.hub.read_resource(server, str(arguments.get("uri") or ""))
+                except Exception as exc:  # noqa: BLE001
+                    return False, str(exc)
             try:
                 return True, self.hub.call(name, arguments)
             except Exception as exc:  # noqa: BLE001
@@ -138,6 +151,12 @@ class ToolRegistry:
             on_output=on_output,
             should_cancel=should_cancel,
         )
+
+    def kind_of(self, name: str) -> str | None:
+        for tool in self.tools():
+            if tool.name == name:
+                return tool.kind
+        return None
 
     def child(self) -> ToolRegistry:
         child = ToolRegistry(hub=self.hub, allow_spawn=False, sandbox=self.sandbox)
@@ -154,3 +173,21 @@ def _mcp_bound(tool: McpTool) -> BoundTool:
         },
     }
     return BoundTool(name=tool.qualified, spec=spec, dangerous=not tool.read_only, kind="mcp")
+
+
+def _resource_bound(server: McpServer) -> BoundTool:
+    listing = "\n".join(f"- {item.uri} ({item.name})" for item in server.resources[:20])
+    name = f"mcp__{server.name}__{RESOURCE_TOOL}"
+    spec = {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": f"[MCP {server.name}] Read one of this server's resources by uri.\n{listing}",
+            "parameters": {
+                "type": "object",
+                "properties": {"uri": {"type": "string"}},
+                "required": ["uri"],
+            },
+        },
+    }
+    return BoundTool(name=name, spec=spec, dangerous=False, kind="mcp_resource")

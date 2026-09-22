@@ -130,6 +130,10 @@ Workspace is a directory on the session, not a git worktree. Paths must stay ins
 
 The Host reads `<root>/mcp.json` (`mcpServers` map, same shape as Claude/Codex config). Each server is a stdio JSON-RPC process with LSP `Content-Length` framing. Tools are registered as `mcp__<server>__<tool>` and executed as ordinary `tool.call` / `tool.result` events. Read-only MCP tools skip the permission gate; others are dangerous.
 
+An entry with `url` instead of `command` speaks streamable HTTP: one POST per JSON-RPC message, answered with either `application/json` or an `text/event-stream` frame.
+
+Resources advertised by the server become a read-only `mcp__<server>__read_resource` tool whose description lists the available uris. Prompts advertised by the server become TUI commands `/<server>:<prompt>`; arguments are `name=value` pairs, and bare text fills a prompt that declares exactly one argument. `GET /mcp` exposes the lists over the Host API.
+
 ## Sub-agents
 
 `spawn_agent` is a dangerous builtin. It creates a child session (`session.created.parent_session_id`) in the same workspace, runs one turn with auto-allow, and returns a digest. The child has its own log. Depth is capped at 1 (the child cannot spawn). This is a nested Engine, not a second Host.

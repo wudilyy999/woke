@@ -46,10 +46,13 @@ MCP servers (optional) go in `<root>/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "echo": { "command": "python3", "args": ["tests/fake_mcp.py"] }
+    "echo": { "command": "python3", "args": ["tests/fake_mcp.py"] },
+    "remote": { "url": "http://127.0.0.1:8787/mcp" }
   }
 }
 ```
+
+Servers may be stdio processes (`command`) or streamable HTTP endpoints (`url`). Their resources are readable through `mcp__<server>__read_resource`, and their prompts show up as `/<server>:<prompt>` in the TUI.
 
 Real model:
 

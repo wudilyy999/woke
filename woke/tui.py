@@ -18,7 +18,7 @@ from woke.commands import expand_command, load_commands
 from woke.events import Event
 from woke.files import image_rel
 from woke.host import Host, HostClient
-from woke.errors import HostLocked
+from woke.errors import HostLocked, ValidationError
 from woke.model import active_model_label, build_model
 from woke.policy import AutoAllow, GradedPolicy, WaitUser
 from woke.projection import estimate_tokens, pending_permission_id, project_messages
@@ -162,14 +162,37 @@ def wrap_text(text: str, width: int) -> list[str]:
     return lines or [""]
 
 
-def filter_slash(prefix: str, custom: dict[str, str] | None = None) -> list[tuple[str, str]]:
+def filter_slash(
+    prefix: str,
+    custom: dict[str, str] | None = None,
+    prompts: dict[str, str] | None = None,
+) -> list[tuple[str, str]]:
     needle = prefix.strip().lower()
     items = list(COMMANDS)
     for name in sorted(custom or {}):
         items.append((f"/{name}", "custom command"))
+    for name in sorted(prompts or {}):
+        items.append((f"/{name}", (prompts or {}).get(name) or "MCP prompt"))
     if needle == "/":
         return items
     return [item for item in items if item[0].startswith(needle)]
+
+
+def prompt_arguments(names: list[str], text: str) -> dict[str, str]:
+    """`name=value` pairs fill named arguments; bare text fills a lone argument."""
+    pairs: dict[str, str] = {}
+    bare: list[str] = []
+    for token in text.split():
+        key, sep, value = token.partition("=")
+        if sep and key in names:
+            pairs[key] = value
+        else:
+            bare.append(token)
+    if bare and len(names) == 1:
+        pairs.setdefault(names[0], " ".join(bare))
+    elif bare:
+        raise ValidationError(f"prompt arguments need name=value pairs: {', '.join(names) or 'none'}")
+    return pairs
 
 
 def _short(value: Any, limit: int = 80) -> str:
@@ -469,6 +492,7 @@ class Tui:
         self._lock = threading.Lock()
         self._color = {}
         self.custom_commands: dict[str, str] = {}
+        self.mcp_prompt_commands: dict[str, dict[str, Any]] = {}
         self.reload_commands()
 
     @property
@@ -483,6 +507,9 @@ class Tui:
 
     def reload_commands(self) -> None:
         self.custom_commands = load_commands(Path(self.workspace()))
+        self.mcp_prompt_commands = {
+            f"{item['server']}:{item['name']}": item for item in self.host.mcp_prompts()
+        }
 
     def send(self, text: str) -> None:
         if self.busy or not text.strip():
@@ -552,6 +579,10 @@ class Tui:
         return filter_slash(
             self.input if self.input.startswith("/") else "/",
             self.custom_commands,
+            {
+                name: str(item.get("description") or "MCP prompt")
+                for name, item in self.mcp_prompt_commands.items()
+            },
         )
 
     def model_items(self) -> list[tuple[str, str]]:
@@ -687,7 +718,24 @@ class Tui:
             arguments = raw.strip()[len(cmd) :].strip()
             self.send(expand_command(template, arguments))
             return True
+        prompt = self.mcp_prompt_commands.get(cmd.lstrip("/"))
+        if prompt is not None:
+            return self._run_mcp_prompt(prompt, raw.strip()[len(cmd) :].strip())
         self.error = f"unknown command {cmd}"
+        return True
+
+    def _run_mcp_prompt(self, item: dict[str, Any], text: str) -> bool:
+        try:
+            arguments = prompt_arguments([str(name) for name in item.get("arguments") or []], text)
+            prompt = self.host.mcp_prompt(str(item["server"]), str(item["name"]), arguments)
+        except Exception as exc:  # noqa: BLE001 — prompt failures belong in the composer
+            self.error = str(exc)
+            return True
+        self.error = None
+        self.picker = None
+        self.input = ""
+        self.notice = f"prompt {item['server']}:{item['name']}"
+        self.send(prompt)
         return True
 
     def _set_model(self, model_id: str) -> bool:
@@ -1055,7 +1103,7 @@ class Tui:
         if self.help and self.picker is None:
             rows = [("dim", line) for line in HELP.split("\n")]
             info = self.host.get_session(self.session_id)
-            mcp = ", ".join(s.name for s in self.host.mcp.servers) or "none"
+            mcp = ", ".join(self.host.mcp_server_names()) or "none"
             rows.append(("dim", f"session {info['id'][:8]}  mcp {mcp}"))
             rows.append(
                 ("dim", f"tokens {context_tokens(events)}  budget {self.host.token_budget}")

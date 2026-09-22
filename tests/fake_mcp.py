@@ -45,7 +45,7 @@ def main() -> None:
                     "id": msg_id,
                     "result": {
                         "protocolVersion": "2024-11-05",
-                        "capabilities": {"tools": {}},
+                        "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
                         "serverInfo": {"name": "fake", "version": "0"},
                     },
                 }
@@ -82,6 +82,72 @@ def main() -> None:
                     "jsonrpc": "2.0",
                     "id": msg_id,
                     "result": {"content": [{"type": "text", "text": f"echo:{text}"}]},
+                }
+            )
+        elif method == "resources/list":
+            _write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "resources": [
+                            {
+                                "uri": "fake://notes",
+                                "name": "notes",
+                                "description": "server notes",
+                                "mimeType": "text/plain",
+                            }
+                        ]
+                    },
+                }
+            )
+        elif method == "resources/read":
+            params = message.get("params") or {}
+            _write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "contents": [
+                            {"uri": params.get("uri"), "mimeType": "text/plain", "text": "notes body"}
+                        ]
+                    },
+                }
+            )
+        elif method == "prompts/list":
+            _write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "prompts": [
+                            {
+                                "name": "review",
+                                "description": "review a target",
+                                "arguments": [{"name": "target", "required": True}],
+                            }
+                        ]
+                    },
+                }
+            )
+        elif method == "prompts/get":
+            params = message.get("params") or {}
+            arguments = params.get("arguments") or {}
+            _write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": {
+                                    "type": "text",
+                                    "text": f"review {arguments.get('target')}",
+                                },
+                            }
+                        ]
+                    },
                 }
             )
 

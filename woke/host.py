@@ -218,6 +218,23 @@ class Host:
             out.append(info)
         return out
 
+    def mcp_server_names(self) -> list[str]:
+        return self.mcp.server_names()
+
+    def mcp_prompts(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "server": item.server,
+                "name": item.name,
+                "description": item.description,
+                "arguments": [str(arg.get("name") or "") for arg in item.arguments],
+            }
+            for item in self.mcp.prompts()
+        ]
+
+    def mcp_prompt(self, server: str, name: str, arguments: dict[str, str]) -> str:
+        return self.mcp.prompt_text(server, name, arguments)
+
     def rewind_targets(self, session_id: str) -> list[dict[str, Any]]:
         """User turns that can be forked, newest first."""
         events = self.store.read_session(session_id)
@@ -516,6 +533,17 @@ class HostClient:
     def search_sessions(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         return self._request("GET", f"/search?q={quote(query)}&limit={limit}")["sessions"]
 
+    def mcp_server_names(self) -> list[str]:
+        return self._request("GET", "/mcp")["servers"]
+
+    def mcp_prompts(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/mcp")["prompts"]
+
+    def mcp_prompt(self, server: str, name: str, arguments: dict[str, str]) -> str:
+        return self._request(
+            "POST", "/mcp/prompts", {"server": server, "name": name, "arguments": arguments}
+        )["text"]
+
     def session_for_workspace(self, workspace: str) -> str:
         path = str(Path(workspace).expanduser().resolve())
         for item in self.list_root_sessions():
@@ -619,6 +647,18 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
                     needle = (query.get("q") or [""])[0]
                     limit = int((query.get("limit") or ["20"])[0])
                     return self._json(200, {"sessions": host.search_sessions(needle, limit=limit)})
+                if parts == ["mcp"]:
+                    return self._json(
+                        200,
+                        {
+                            "servers": host.mcp_server_names(),
+                            "resources": [
+                                {"server": item.server, "uri": item.uri, "name": item.name}
+                                for item in host.mcp.resources()
+                            ],
+                            "prompts": host.mcp_prompts(),
+                        },
+                    )
                 if len(parts) == 2 and parts[0] == "sessions":
                     return self._json(200, host.get_session(parts[1]))
                 if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "events":
@@ -672,6 +712,13 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
                     return self._json(200, {"event": None if event is None else event.to_dict()})
                 if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "cancel":
                     return self._json(200, {"cancelled": host.cancel_turn(parts[1])})
+                if parts == ["mcp", "prompts"]:
+                    text = host.mcp_prompt(
+                        str(body.get("server") or ""),
+                        str(body.get("name") or ""),
+                        {str(k): str(v) for k, v in dict(body.get("arguments") or {}).items()},
+                    )
+                    return self._json(200, {"text": text})
                 self._json(404, {"error": "not found"})
             except Exception as exc:
                 self._handle_error(exc)
