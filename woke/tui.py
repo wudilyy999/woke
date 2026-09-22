@@ -332,7 +332,7 @@ def status_line(
     perm: str = "",
     plan: bool = False,
 ) -> str:
-    tokens = estimate_tokens(project_messages(events))
+    tokens = context_tokens(events)
     left = max(0, 100 - int(tokens * 100 / max(budget, 1)))
     perm_label = perm or ("auto" if yes else "ask")
     access = "plan" if plan else f"perm:{perm_label}"
@@ -340,6 +340,22 @@ def status_line(
         act = activity_line(events, True, tick, phase) or f"{spinner_frame(tick)}  working"
         return f"{left}% context left  {model}  {access}  {act}  / commands"
     return f"{left}% context left  {model}  {access}  / commands"
+
+
+def context_tokens(events: list[Event]) -> int:
+    """Total tokens reported by the provider, else a chars/4 estimate of the prompt."""
+    for event in reversed(events):
+        if event.kind != "model.message":
+            continue
+        usage = event.payload.get("usage")
+        if not usage:
+            continue
+        total = usage.get("total_tokens") or (
+            (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)
+        )
+        if total:
+            return int(total)
+    return estimate_tokens(project_messages(events))
 
 
 def pending_call(events: list[Event]) -> tuple[str, str] | None:
@@ -996,6 +1012,9 @@ class Tui:
             info = self.host.get_session(self.session_id)
             mcp = ", ".join(s.name for s in self.host.mcp.servers) or "none"
             rows.append(("dim", f"session {info['id'][:8]}  mcp {mcp}"))
+            rows.append(
+                ("dim", f"tokens {context_tokens(events)}  budget {self.host.token_budget}")
+            )
             if self.host.mcp_errors:
                 rows.extend(("err", err) for err in self.host.mcp_errors)
         elif not user_seen and self.picker is None:

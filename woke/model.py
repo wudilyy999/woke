@@ -24,6 +24,7 @@ class ToolCall:
 class ModelReply:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: dict[str, Any] | None = None
 
 
 OnDelta = Callable[[str], None]
@@ -151,15 +152,25 @@ class OpenAICompatModel:
         tools: list[dict[str, Any]],
         on_delta: OnDelta | None = None,
     ) -> ModelReply:
-        body: dict[str, Any] = {"model": self.model, "messages": messages, "stream": True}
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
         if tools:
             body["tools"] = tools
         try:
             return self._stream("/chat/completions", body, on_delta)
         except ModelError:
             body.pop("stream", None)
+            body.pop("stream_options", None)
             data = self._post("/chat/completions", body)
-            return self._parse_message((data.get("choices") or [{}])[0].get("message") or {}, on_delta)
+            return self._parse_message(
+                (data.get("choices") or [{}])[0].get("message") or {},
+                on_delta,
+                data.get("usage"),
+            )
 
     def summarize(self, text: str) -> str:
         reply = self.complete(
@@ -205,7 +216,12 @@ class OpenAICompatModel:
             time.sleep(0.4 * (2**attempt))
         raise last_error or ModelError("model request failed")
 
-    def _parse_message(self, choice: dict[str, Any], on_delta: OnDelta | None) -> ModelReply:
+    def _parse_message(
+        self,
+        choice: dict[str, Any],
+        on_delta: OnDelta | None,
+        usage: dict[str, Any] | None = None,
+    ) -> ModelReply:
         calls = []
         for raw in choice.get("tool_calls") or []:
             fn = raw.get("function") or {}
@@ -227,7 +243,7 @@ class OpenAICompatModel:
         text = choice.get("content") or ""
         if on_delta and text:
             on_delta(text)
-        return ModelReply(text=text, tool_calls=calls)
+        return ModelReply(text=text, tool_calls=calls, usage=usage)
 
     def _stream(self, path: str, body: dict[str, Any], on_delta: OnDelta | None) -> ModelReply:
         payload = json.dumps(body).encode("utf-8")
@@ -243,6 +259,7 @@ class OpenAICompatModel:
         )
         text = ""
         tools: dict[int, dict[str, str]] = {}
+        usage: dict[str, Any] | None = None
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 while True:
@@ -259,6 +276,8 @@ class OpenAICompatModel:
                         chunk = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    if chunk.get("usage"):
+                        usage = chunk["usage"]
                     delta = ((chunk.get("choices") or [{}])[0].get("delta") or {})
                     piece = delta.get("content") or ""
                     if piece:
@@ -292,7 +311,7 @@ class OpenAICompatModel:
             calls.append(
                 ToolCall(id=slot["id"] or f"call-{idx+1}", name=slot["name"], arguments=parsed)
             )
-        return ModelReply(text=text, tool_calls=calls)
+        return ModelReply(text=text, tool_calls=calls, usage=usage)
 
 
 def build_model(model_id: str | None = None) -> Model:
@@ -339,5 +358,4 @@ def _last_tool(messages: list[dict[str, Any]]) -> bool:
         if message.get("role") in {"user", "assistant"}:
             return False
     return False
-
 

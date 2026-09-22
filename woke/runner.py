@@ -375,6 +375,8 @@ class Engine:
 
     def _emit_model(self, session_id: str, turn_id: str, run_id: str, reply: ModelReply) -> None:
         payload: dict[str, Any] = {"text": reply.text or ""}
+        if reply.usage:
+            payload["usage"] = reply.usage
         if reply.tool_calls:
             payload["tool_calls"] = [
                 {"id": call.id, "name": call.name, "arguments": call.arguments}
