@@ -108,6 +108,12 @@ def validate_event(
             raise ValidationError(f"bad run status: {payload['status']}")
     elif kind == "user.message":
         _require_str(payload, "text")
+        if "images" in payload:
+            images = payload["images"]
+            if not isinstance(images, list) or not all(
+                isinstance(item, str) and item for item in images
+            ):
+                raise ValidationError("user.message images must be a list of paths")
     elif kind == "model.message":
         if "text" in payload and not isinstance(payload["text"], str):
             raise ValidationError("model.message text must be a string")

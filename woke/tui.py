@@ -16,6 +16,7 @@ from typing import Any
 
 from woke.commands import expand_command, load_commands
 from woke.events import Event
+from woke.files import image_rel
 from woke.host import Host, HostClient
 from woke.errors import HostLocked
 from woke.model import active_model_label, build_model
@@ -25,6 +26,7 @@ from woke.projection import estimate_tokens, pending_permission_id, project_mess
 COMMANDS: list[tuple[str, str]] = [
     ("/model", "switch model"),
     ("/workspace", "switch project directory"),
+    ("/image", "attach an image to the next message"),
     ("/resume", "resume or search a previous session"),
     ("/rewind", "fork from an earlier user message"),
     ("/fork", "copy this session and keep going"),
@@ -45,6 +47,7 @@ COMMANDS: list[tuple[str, str]] = [
 HELP = """/            command picker
 /model       switch model (↑↓ then Enter)
 /workspace   switch directory (↑↓ then Enter)
+/image PATH  attach an image to the next message
 /resume      resume a previous session; text searches every transcript
 /rewind      fork from an earlier user turn (Esc Esc)
 /fork        copy this session
@@ -456,6 +459,7 @@ class Tui:
         self.help = False
         self.notice: str | None = None
         self.plan_mode = False
+        self.pending_images: list[str] = []
         self.live_text = ""
         self.live_tool_output = ""
         self.picker: str | None = None  # slash | models | workspace | permission
@@ -483,6 +487,8 @@ class Tui:
     def send(self, text: str) -> None:
         if self.busy or not text.strip():
             return
+        images = self.pending_images
+        self.pending_images = []
         self.live_text = ""
         self.live_tool_output = ""
         self._run_bg(
@@ -493,6 +499,7 @@ class Tui:
                 on_delta=self._append_delta,
                 on_tool_output=self._append_tool_output,
                 mode="plan" if self.plan_mode else "execute",
+                images=images,
             ),
         )
 
@@ -659,6 +666,22 @@ class Tui:
                 self.menu_index = 0
                 return True
             return self._set_workspace(parts[1].strip())
+        if cmd == "/image":
+            parts = raw.split(maxsplit=1)
+            if len(parts) == 1:
+                self.error = "usage: /image PATH"
+                return True
+            try:
+                rel = image_rel(Path(self.workspace()), parts[1].strip())
+            except Exception as exc:  # noqa: BLE001 — bad paths belong in the composer
+                self.error = str(exc)
+                return True
+            if rel not in self.pending_images:
+                self.pending_images.append(rel)
+            self.notice = f"attached {rel} ({len(self.pending_images)} queued)"
+            self.error = None
+            self.input = ""
+            return True
         template = self.custom_commands.get(cmd.lstrip("/"))
         if template is not None:
             arguments = raw.strip()[len(cmd) :].strip()
@@ -700,6 +723,7 @@ class Tui:
             self.error = f"not a directory: {path}"
             return True
         self.session_id = self.host.create_session(str(target))
+        self.pending_images = []
         self.reload_commands()
         self.notice = f"new session in {target}"
         self.error = None
@@ -710,6 +734,7 @@ class Tui:
 
     def _new_session(self) -> bool:
         self.session_id = self.host.create_session(self.workspace())
+        self.pending_images = []
         self.reload_commands()
         self.notice = "new conversation"
         self.picker = None
@@ -740,6 +765,7 @@ class Tui:
             return True
         item = matches[0]
         self.session_id = item["id"]
+        self.pending_images = []
         self.reload_commands()
         self.notice = f"resumed {item['id'][:8]}  {item['title']}"
         self.picker = None
@@ -1042,6 +1068,8 @@ class Tui:
             rows = transcript_lines(events, w)
 
         live = activity_line(events, self.busy, self.tick, getattr(self.host, "phase", ""))
+        if self.pending_images:
+            rows.append(("dim", "attached " + ", ".join(self.pending_images)))
         if self.notice:
             rows.append(("ok", self.notice))
         if self.error:

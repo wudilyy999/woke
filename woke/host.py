@@ -318,6 +318,7 @@ class Host:
         on_delta: Any = None,
         on_tool_output: Any = None,
         mode: str = "execute",
+        images: list[str] | None = None,
     ) -> TurnOutcome:
         self.get_session(session_id)
         policy = AutoDeny() if mode == "plan" else (parse_policy(yes) if yes else self.policy)
@@ -332,7 +333,7 @@ class Host:
                     on_delta=on_delta,
                     on_tool_output=on_tool_output,
                     should_cancel=cancel.is_set,
-                ).start_turn(session_id, text, mode=mode)
+                ).start_turn(session_id, text, mode=mode, images=images)
             finally:
                 self._end_turn(session_id)
                 self.phase = ""
@@ -539,11 +540,12 @@ class HostClient:
         on_delta: Any = None,
         on_tool_output: Any = None,
         mode: str = "execute",
+        images: list[str] | None = None,
     ) -> TurnOutcome:
         data = self._request(
             "POST",
             f"/sessions/{session_id}/turns",
-            {"text": text, "yes": yes, "mode": mode},
+            {"text": text, "yes": yes, "mode": mode, "images": list(images or [])},
         )
         outcome = _outcome_from_json(data)
         if on_delta:
@@ -649,8 +651,12 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
                 if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "turns":
                     yes = bool(body.get("yes"))
                     mode = str(body.get("mode") or "execute")
+                    raw_images = body.get("images") or []
+                    if not isinstance(raw_images, list):
+                        raise WokeError("images must be a list")
+                    images = [str(item) for item in raw_images]
                     outcome = host.run_turn(
-                        parts[1], str(body.get("text") or ""), yes=yes, mode=mode
+                        parts[1], str(body.get("text") or ""), yes=yes, mode=mode, images=images
                     )
                     return self._json(200, _outcome_json(outcome))
                 if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "permissions":

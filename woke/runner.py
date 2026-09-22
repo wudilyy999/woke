@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from woke.errors import SimulatedCrash, ToolCancelled, TurnCancelled
 from woke.events import Event, TODO_STATUSES
-from woke.files import expand_mentions, snapshot_before, unified_diff
+from woke.files import expand_images, expand_mentions, mention_images, snapshot_before, unified_diff
 from woke.memory import load_briefing
 from woke.model import Model, ModelReply
 from woke.policy import Policy, load_rules
@@ -129,7 +129,13 @@ class Engine:
             self.on_event(event)
         return event
 
-    def start_turn(self, session_id: str, text: str, mode: str = "execute") -> TurnOutcome:
+    def start_turn(
+        self,
+        session_id: str,
+        text: str,
+        mode: str = "execute",
+        images: list[str] | None = None,
+    ) -> TurnOutcome:
         turn_id = str(uuid.uuid4())
         run_id = str(uuid.uuid4())
         self.mode = mode
@@ -145,13 +151,18 @@ class Engine:
         try:
             self.emit(session_id, "turn.started", {"mode": mode}, turn_id=turn_id)
             self.emit(session_id, "run.started", {"reason": "fresh"}, turn_id=turn_id, run_id=run_id)
+            workspace = Path(workspace_of(self.store.read_session(session_id)))
+            payload: dict[str, Any] = {
+                "text": text,
+                "attachments": expand_mentions(text, workspace),
+            }
+            attached = expand_images(workspace, list(images or []) + mention_images(text, workspace))
+            if attached:
+                payload["images"] = attached
             self.emit(
                 session_id,
                 "user.message",
-                {
-                    "text": text,
-                    "attachments": expand_mentions(text, Path(workspace_of(self.store.read_session(session_id)))),
-                },
+                payload,
                 turn_id=turn_id,
                 run_id=run_id,
             )

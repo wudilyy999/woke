@@ -1,16 +1,68 @@
 from __future__ import annotations
 
+import base64
 import difflib
+import mimetypes
 import os
 import re
 from pathlib import Path
 from typing import Any
 
+from woke.errors import ValidationError
 from woke.events import Event
 from woke.tools import SKIP_DIRS, contained_path
 
 MENTION = re.compile(r"(^|\s)@([^\s@]+)")
 ATTACH_CAP = 80_000
+IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
+IMAGE_CAP = 5_000_000
+
+
+def is_image_path(rel: str) -> bool:
+    return Path(rel).suffix.lower() in IMAGE_SUFFIXES
+
+
+def image_rel(workspace: Path, raw: str) -> str:
+    """Workspace-relative path for an image the user attached."""
+    path = contained_path(workspace, raw)
+    if not path.is_file():
+        raise ValidationError(f"image not found: {raw}")
+    if not is_image_path(path.name):
+        raise ValidationError(f"unsupported image type: {raw}")
+    if path.stat().st_size > IMAGE_CAP:
+        raise ValidationError(f"image over {IMAGE_CAP // 1_000_000}MB: {raw}")
+    return str(path.relative_to(workspace.resolve()))
+
+
+def expand_images(workspace: Path, paths: list[str]) -> list[str]:
+    out: list[str] = []
+    for raw in paths:
+        rel = image_rel(workspace, raw)
+        if rel not in out:
+            out.append(rel)
+    return out
+
+
+def mention_images(text: str, workspace: Path) -> list[str]:
+    out: list[str] = []
+    for match in MENTION.finditer(text):
+        rel = match.group(2).lstrip("./")
+        if not rel or not is_image_path(rel):
+            continue
+        try:
+            path = contained_path(workspace, rel)
+        except Exception:
+            continue
+        if path.is_file():
+            out.append(rel)
+    return out
+
+
+def image_part(workspace: Path, rel: str) -> dict[str, Any]:
+    path = contained_path(workspace, rel)
+    mime = mimetypes.guess_type(path.name)[0] or "image/png"
+    blob = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{blob}"}}
 
 
 def expand_mentions(text: str, workspace: Path) -> list[dict[str, str]]:
@@ -21,6 +73,8 @@ def expand_mentions(text: str, workspace: Path) -> list[dict[str, str]]:
         if not rel or rel in seen:
             continue
         seen.add(rel)
+        if is_image_path(rel):
+            continue
         try:
             path = contained_path(workspace, rel)
         except Exception:

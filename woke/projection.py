@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from woke.events import Event
+from woke.files import image_part
 
 PROMPT_TOOL_CAP = 8_000
+IMAGE_TOKEN_COST = 1_100
 
 
 def latest_compaction(events: list[Event]) -> Event | None:
@@ -45,7 +48,18 @@ def project_messages(events: list[Event], prune_tools: bool = True) -> list[dict
             content = event.payload["text"]
             for attachment in event.payload.get("attachments") or []:
                 content += f"\n\n@{attachment['path']}\n```\n{attachment['content']}\n```"
-            messages.append({"role": "user", "content": content})
+            images = event.payload.get("images") or []
+            if images:
+                workspace = Path(workspace_of(events))
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": content}]
+                        + [image_part(workspace, rel) for rel in images],
+                    }
+                )
+            else:
+                messages.append({"role": "user", "content": content})
         elif event.kind == "model.message":
             msg: dict[str, Any] = {
                 "role": "assistant",
@@ -138,10 +152,24 @@ def compact_cut_seq(events: list[Event], turn_id: str | None) -> int | None:
 def estimate_tokens(messages: list[dict[str, Any]]) -> int:
     total = 0
     for message in messages:
-        total += len(message.get("content") or "")
+        total += _content_chars(message.get("content"))
         for call in message.get("tool_calls") or []:
             total += len(json.dumps(call, ensure_ascii=False))
     return max(1, total // 4)
+
+
+def _content_chars(content: Any) -> int:
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        total = 0
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                total += len(part.get("text") or "")
+            else:
+                total += IMAGE_TOKEN_COST * 4
+        return total
+    return 0
 
 
 def render_for_summary(events: list[Event]) -> str:

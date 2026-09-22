@@ -26,6 +26,8 @@ Logs live under `~/.woke/ws/<hash>/` per workspace so two projects can run at on
 
 Enter sends, `y`/`n` answer permission prompts, `/plan` toggles read-only planning turns, `/help` lists slash commands, `/quit` exits.
 
+Screenshots go in with `/image PATH` (queued for the next message) or `@path.png` in the text; the CLI takes `woke send --image PATH`. Images are sent as `image_url` parts, so the model needs vision support.
+
 Headless Host + CLI still work:
 
 ```sh

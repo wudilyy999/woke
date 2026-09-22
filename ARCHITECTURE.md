@@ -55,6 +55,8 @@ Envelope: `seq, ts, session_id, turn_id, run_id, kind, payload`.
 
 `seq` is a global integer. Compaction never deletes rows.
 
+`user.message` carries the text, the text attachments resolved from `@path` mentions, and `images` (workspace-relative paths). The prompt projection turns an image into an OpenAI `image_url` part with a `data:` URL, so the log stays readable and only the request grows.
+
 ## Recovery
 
 On Host start, any turn with `turn.started` and no `turn.terminated` is recovered:
