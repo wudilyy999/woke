@@ -844,7 +844,8 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
             self.send_header("Connection", "close")
             self.end_headers()
             while True:
-                for event in host.events(session_id, after=after):
+                events = host.events(session_id, after=after)
+                for event in events:
                     after = event.seq
                     frame = f"event: {event.kind}\ndata: {json.dumps(event.to_dict(), ensure_ascii=False)}\n\n"
                     try:
@@ -854,6 +855,8 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
                         return
                     if event.kind == "turn.terminated":
                         return
+                if not events and host.get_session(session_id)["open_turn"] is None:
+                    return
                 time.sleep(0.05)
 
         def _path(self) -> tuple[list[str], dict[str, list[str]]]:

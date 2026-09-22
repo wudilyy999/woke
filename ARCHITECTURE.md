@@ -120,7 +120,7 @@ Loopback HTTP, shared token (`X-Woke-Token` or `Authorization: Bearer`). JSON re
 
 `GET /search?q=` reads `user.message` and `model.message` bodies across every session in the root and returns one hit per session with a snippet and a match count. Child sessions are omitted. The CLI wraps it as `woke search`, and `/resume <text>` in the TUI merges those hits into the session picker.
 
-`POST /sessions/{id}/turns` with `"background": true` returns `202` and runs the turn on a worker thread. `GET /sessions/{id}/events/stream?after=N` then delivers server-sent events as they are appended and closes on `turn.terminated`; a turn that dies outside the runner still writes a failed `run.terminated` / `turn.terminated` pair, so a follower never hangs. `HostClient.start_turn` plus `HostClient.stream_events` are the SDK for editors: import them from `woke.host`, or speak the two endpoints from any language.
+`POST /sessions/{id}/turns` with `"background": true` returns `202` and runs the turn on a worker thread. `GET /sessions/{id}/events/stream?after=N` then delivers server-sent events as they are appended and closes on `turn.terminated`, or at once when there is nothing left to replay and no turn is open. A turn that dies outside the runner still writes a failed `run.terminated` / `turn.terminated` pair, so a follower never hangs. `HostClient.start_turn` plus `HostClient.stream_events` are the SDK for editors: import them from `woke.host`, or speak the two endpoints from any language.
 
 ## Tools
 
