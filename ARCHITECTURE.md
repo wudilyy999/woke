@@ -49,6 +49,7 @@ Unknown `kind` values are rejected at the writer. v1 kinds:
 | `tool.call` / `tool.result` | tool facts |
 | `permission.requested` / `permission.decided` | dangerous-tool gate |
 | `compaction.applied` | LLM summary covering `from_seq`–`to_seq` |
+| `todo.updated` | task list for the current turn, rendered by the TUI |
 
 Envelope: `seq, ts, session_id, turn_id, run_id, kind, payload`.
 
@@ -74,6 +75,9 @@ Prompt construction:
 2. Workspace briefing from `AGENTS.md`, `CLAUDE.md`, `.woke/instructions.md`, and `.woke/memory.md` (capped).
 3. Latest `compaction.applied` summary, if any.
 4. Events after that `to_seq`. Tool bodies are pruned in the prompt (8k chars); the log keeps the full output.
+5. The latest `todo.updated` list, and the plan-mode instruction when the turn runs in plan mode.
+
+`turn.started` records `mode`: `plan` or `execute`. A plan turn runs under the read-only policy, so dangerous tools are denied while the model inspects the workspace and writes a plan. `todo_write` appends `todo.updated`; the runner handles it so the list lands in the log rather than on disk.
 
 `memory_read` / `memory_write` persist notes in `.woke/memory.md` so they survive compaction.
 

@@ -14,7 +14,7 @@ from woke.errors import AuthError, HostDown, NotFound, SessionBusy, WokeError
 from woke.events import Event
 from woke.mcp import McpHub
 from woke.model import Model, build_model
-from woke.policy import AutoAllow, Policy, WaitUser, parse_policy
+from woke.policy import AutoAllow, AutoDeny, Policy, WaitUser, parse_policy
 from woke.projection import last_model_message, open_run_id, open_turn_id, pending_permission_id
 from woke.registry import ToolRegistry
 from woke.runner import DEFAULT_BUDGET, Engine, TurnOutcome
@@ -304,9 +304,10 @@ class Host:
         yes: bool = False,
         on_delta: Any = None,
         on_tool_output: Any = None,
+        mode: str = "execute",
     ) -> TurnOutcome:
         self.get_session(session_id)
-        policy = parse_policy(yes) if yes else self.policy
+        policy = AutoDeny() if mode == "plan" else (parse_policy(yes) if yes else self.policy)
         with self._lock_for(session_id):
             events = self.store.read_session(session_id)
             if open_turn_id(events):
@@ -318,7 +319,7 @@ class Host:
                     on_delta=on_delta,
                     on_tool_output=on_tool_output,
                     should_cancel=cancel.is_set,
-                ).start_turn(session_id, text)
+                ).start_turn(session_id, text, mode=mode)
             finally:
                 self._end_turn(session_id)
                 self.phase = ""
@@ -521,8 +522,13 @@ class HostClient:
         yes: bool = False,
         on_delta: Any = None,
         on_tool_output: Any = None,
+        mode: str = "execute",
     ) -> TurnOutcome:
-        data = self._request("POST", f"/sessions/{session_id}/turns", {"text": text, "yes": yes})
+        data = self._request(
+            "POST",
+            f"/sessions/{session_id}/turns",
+            {"text": text, "yes": yes, "mode": mode},
+        )
         outcome = _outcome_from_json(data)
         if on_delta:
             for event in outcome.events:
@@ -622,7 +628,10 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
                     return self._json(201, host.get_session(session_id))
                 if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "turns":
                     yes = bool(body.get("yes"))
-                    outcome = host.run_turn(parts[1], str(body.get("text") or ""), yes=yes)
+                    mode = str(body.get("mode") or "execute")
+                    outcome = host.run_turn(
+                        parts[1], str(body.get("text") or ""), yes=yes, mode=mode
+                    )
                     return self._json(200, _outcome_json(outcome))
                 if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "permissions":
                     outcome = host.decide_permission(

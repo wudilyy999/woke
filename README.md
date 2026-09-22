@@ -24,7 +24,7 @@ Model config is read from `~/.woke/config.toml` if present, else `~/.kimi-code/c
 
 Logs live under `~/.woke/ws/<hash>/` per workspace so two projects can run at once. `/rewind` (or Esc Esc) forks an earlier user turn; `/fork` copies the session. Workspace files are not reverted.
 
-Enter sends, `y`/`n` answer permission prompts, `/help` lists slash commands, `/quit` exits.
+Enter sends, `y`/`n` answer permission prompts, `/plan` toggles read-only planning turns, `/help` lists slash commands, `/quit` exits.
 
 Headless Host + CLI still work:
 

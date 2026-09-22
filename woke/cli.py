@@ -49,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     send_p.add_argument("session")
     send_p.add_argument("text")
     send_p.add_argument("--yes", action="store_true")
+    send_p.add_argument("--plan", action="store_true", help="read-only planning turn")
 
     ev_p = sub.add_parser("events", help="print the session log")
     ev_p.add_argument("session")
@@ -218,7 +219,7 @@ def _cmd_session(root: Path, args: argparse.Namespace) -> int:
 def _cmd_send(root: Path, args: argparse.Namespace) -> int:
     data = _client(root).post(
         f"/sessions/{args.session}/turns",
-        {"text": args.text, "yes": bool(args.yes)},
+        {"text": args.text, "yes": bool(args.yes), "mode": "plan" if args.plan else "execute"},
     )
     _print_events(data.get("events") or [])
     status = data.get("status")

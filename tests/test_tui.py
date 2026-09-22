@@ -65,6 +65,27 @@ class TuiRenderTests(unittest.TestCase):
         ], 80)
         self.assertIn(("err", "model HTTP 404: model_not_found"), rows)
 
+    def test_todo_event_renders_checklist(self) -> None:
+        rows = transcript_lines(
+            [
+                _event(
+                    1,
+                    "todo.updated",
+                    {
+                        "items": [
+                            {"text": "inspect", "status": "completed"},
+                            {"text": "edit", "status": "in_progress"},
+                        ]
+                    },
+                )
+            ],
+            60,
+        )
+        texts = [text for _style, text in rows]
+        self.assertIn("tasks", texts)
+        self.assertTrue(any("[x] inspect" in text for text in texts))
+        self.assertTrue(any("[>] edit" in text for text in texts))
+
     def test_welcome_looks_like_codex_card(self) -> None:
         lines = [text for _style, text in welcome_lines("gpt-4o-mini", "/Users/me/proj", 50)]
         joined = "\n".join(lines)
@@ -100,6 +121,8 @@ class TuiRenderTests(unittest.TestCase):
         self.assertIn("context left", line)
         self.assertIn("auto", line)
         self.assertIn("commands", line)
+        plan_line = status_line([], 32000, "gpt-4o-mini", False, True, plan=True)
+        self.assertIn("plan", plan_line)
 
     def test_cjk_width_and_slash_filter(self) -> None:
         self.assertEqual(display_width("中"), 2)

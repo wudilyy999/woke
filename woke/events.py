@@ -19,15 +19,18 @@ KINDS = frozenset(
         "permission.requested",
         "permission.decided",
         "compaction.applied",
+        "todo.updated",
     }
 )
 
 TURN_STATUSES = frozenset({"completed", "failed", "aborted", "cancelled"})
+TURN_MODES = frozenset({"plan", "execute"})
 RUN_REASONS = frozenset({"fresh", "recovery"})
 RUN_STATUSES = frozenset({"completed", "failed", "aborted"})
 PERMISSION_DECISIONS = frozenset({"allow", "deny"})
 PERMISSION_SOURCES = frozenset({"policy", "user", "recovery", "grant"})
 PERMISSION_SCOPES = frozenset({"once", "session"})
+TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})
 
 _REQUIRED: dict[str, tuple[str, ...]] = {
     "session.created": ("workspace", "title"),
@@ -42,6 +45,7 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
     "permission.requested": ("id", "name", "arguments"),
     "permission.decided": ("id", "decision", "source"),
     "compaction.applied": ("summary", "from_seq", "to_seq"),
+    "todo.updated": ("items",),
 }
 
 
@@ -82,6 +86,7 @@ def validate_event(
         "tool.result",
         "permission.requested",
         "permission.decided",
+        "todo.updated",
     }:
         if not run_id:
             raise ValidationError(f"{kind} requires run_id")
@@ -92,6 +97,9 @@ def validate_event(
     elif kind == "turn.terminated":
         if payload["status"] not in TURN_STATUSES:
             raise ValidationError(f"bad turn status: {payload['status']}")
+    elif kind == "turn.started":
+        if "mode" in payload and payload["mode"] not in TURN_MODES:
+            raise ValidationError(f"bad turn mode: {payload['mode']}")
     elif kind == "run.started":
         if payload["reason"] not in RUN_REASONS:
             raise ValidationError(f"bad run reason: {payload['reason']}")
@@ -136,6 +144,15 @@ def validate_event(
             raise ValidationError("compaction seq range must be int")
         if payload["from_seq"] < 1 or payload["to_seq"] < payload["from_seq"]:
             raise ValidationError("compaction seq range is invalid")
+    elif kind == "todo.updated":
+        if not isinstance(payload["items"], list) or not payload["items"]:
+            raise ValidationError("todo.updated items must be a non-empty list")
+        for item in payload["items"]:
+            if not isinstance(item, dict):
+                raise ValidationError("todo.updated item must be an object")
+            _require_str(item, "text")
+            if item.get("status") not in TODO_STATUSES:
+                raise ValidationError(f"bad todo status: {item.get('status')}")
 
 
 def _require_str(payload: dict[str, Any], key: str) -> None:

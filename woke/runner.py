@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from woke.errors import SimulatedCrash, ToolCancelled, TurnCancelled
-from woke.events import Event
+from woke.events import Event, TODO_STATUSES
 from woke.files import expand_mentions, snapshot_before, unified_diff
 from woke.memory import load_briefing
 from woke.model import Model, ModelReply
@@ -25,7 +25,7 @@ from woke.projection import (
     session_grants,
     workspace_of,
 )
-from woke.registry import MAX_SPAWN_DEPTH, SPAWN_NAME, ToolRegistry
+from woke.registry import MAX_SPAWN_DEPTH, SPAWN_NAME, TODO_NAME, ToolRegistry
 from woke.store import Store
 from woke.tools import cap_output
 
@@ -40,6 +40,12 @@ The event log is durable; do not claim work is done unless a tool result shows i
 If a tool fails, read the error and try a different approach. Do not repeat the same failing call.
 Use memory_read/memory_write for notes that should survive compaction (.woke/memory.md).
 MCP tools are named mcp__<server>__<tool>. spawn_agent runs a nested agent with its own session log; do not nest further.
+"""
+
+PLAN_MODE = """
+You are in plan mode. Inspect the workspace with read-only tools, then answer with a concrete,
+ordered plan. Do not modify files, run state-changing commands, or start sub-agents until the
+user leaves plan mode.
 """
 
 OnEvent = Callable[[Event], None]
@@ -93,6 +99,7 @@ class Engine:
         self.on_delta = on_delta
         self.on_tool_output = on_tool_output
         self.should_cancel = should_cancel if should_cancel is not None else _never_cancel
+        self.mode = "execute"
 
     def _phase(self, text: str) -> None:
         if self.on_phase:
@@ -117,9 +124,10 @@ class Engine:
             self.on_event(event)
         return event
 
-    def start_turn(self, session_id: str, text: str) -> TurnOutcome:
+    def start_turn(self, session_id: str, text: str, mode: str = "execute") -> TurnOutcome:
         turn_id = str(uuid.uuid4())
         run_id = str(uuid.uuid4())
+        self.mode = mode
         collected: list[Event] = []
         previous = self.on_event
 
@@ -130,7 +138,7 @@ class Engine:
 
         self.on_event = capture
         try:
-            self.emit(session_id, "turn.started", {}, turn_id=turn_id)
+            self.emit(session_id, "turn.started", {"mode": mode}, turn_id=turn_id)
             self.emit(session_id, "run.started", {"reason": "fresh"}, turn_id=turn_id, run_id=run_id)
             self.emit(
                 session_id,
@@ -298,7 +306,7 @@ class Engine:
             self._phase("waiting for model")
             try:
                 reply = self.model.complete(
-                    _with_system(events), self.registry.specs(), on_delta=self._model_delta
+                    _with_system(events, self.mode), self.registry.specs(), on_delta=self._model_delta
                 )
             except SimulatedCrash:
                 raise
@@ -477,7 +485,9 @@ class Engine:
                     continue
             try:
                 self._phase(f"running {name}")
-                if name == SPAWN_NAME:
+                if name == TODO_NAME:
+                    ok, output = self._todo(session_id, arguments, turn_id, run_id)
+                elif name == SPAWN_NAME:
                     ok, output = self._spawn(session_id, arguments, workspace)
                 else:
                     ok, output = self.registry.execute(
@@ -526,6 +536,37 @@ class Engine:
             return False, "spawn_agent is not available"
         return self.spawn_child(parent_id, arguments, workspace, self.depth)
 
+    def _todo(
+        self,
+        session_id: str,
+        arguments: dict[str, Any],
+        turn_id: str,
+        run_id: str,
+    ) -> tuple[bool, str]:
+        items = arguments.get("items")
+        if not isinstance(items, list) or not items:
+            return False, "items must be a non-empty list"
+        normalized: list[dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                return False, "each item must be an object"
+            text = str(item.get("text") or "").strip()
+            status = str(item.get("status") or "")
+            if not text:
+                return False, "item text is required"
+            if status not in TODO_STATUSES:
+                return False, f"bad item status: {status}"
+            normalized.append({"text": text, "status": status})
+        self.emit(
+            session_id,
+            "todo.updated",
+            {"items": normalized},
+            turn_id=turn_id,
+            run_id=run_id,
+        )
+        done = sum(1 for item in normalized if item["status"] == "completed")
+        return True, f"{done}/{len(normalized)} todos complete"
+
     def _maybe_crash(self) -> None:
         if not self.crash_after_tool_call:
             return
@@ -534,10 +575,26 @@ class Engine:
         raise SimulatedCrash("crash after tool.call")
 
 
-def _with_system(events: list[Event]) -> list[dict[str, Any]]:
+def _render_todos(events: list[Event]) -> str:
+    latest = None
+    for event in events:
+        if event.kind == "todo.updated":
+            latest = event
+    if latest is None:
+        return ""
+    marks = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]"}
+    return "\n".join(f"{marks[item['status']]} {item['text']}" for item in latest.payload["items"])
+
+
+def _with_system(events: list[Event], mode: str = "execute") -> list[dict[str, Any]]:
     workspace = workspace_of(events)
     content = SYSTEM.format(workspace=workspace)
+    if mode == "plan":
+        content += "\n" + PLAN_MODE
     briefing = load_briefing(Path(workspace))
     if briefing:
         content += "\n\n# Workspace memory\n" + briefing
+    todos = _render_todos(events)
+    if todos:
+        content += "\n\n# Task list\n" + todos
     return [{"role": "system", "content": content}] + project_messages(events)

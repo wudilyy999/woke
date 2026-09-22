@@ -9,6 +9,7 @@ from woke.sandbox import SandboxManager
 from woke.tools import DANGEROUS, TOOL_SPECS, execute as execute_builtin
 
 SPAWN_NAME = "spawn_agent"
+TODO_NAME = "todo_write"
 MAX_SPAWN_DEPTH = 1
 
 SPAWN_SPEC: dict[str, Any] = {
@@ -27,6 +28,37 @@ SPAWN_SPEC: dict[str, Any] = {
                 "label": {"type": "string", "description": "Short name for the child session."},
             },
             "required": ["task"],
+        },
+    },
+}
+
+TODO_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": TODO_NAME,
+        "description": (
+            "Record the task list for this turn so progress stays visible. "
+            "Send the full list on every call, with one item in_progress at most."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                            },
+                        },
+                        "required": ["text", "status"],
+                    },
+                }
+            },
+            "required": ["items"],
         },
     },
 }
@@ -62,6 +94,7 @@ class ToolRegistry:
         ]
         for tool in self.hub.tools():
             out.append(_mcp_bound(tool))
+        out.append(BoundTool(name=TODO_NAME, spec=TODO_SPEC, dangerous=False, kind="builtin"))
         if self.allow_spawn:
             out.append(BoundTool(name=SPAWN_NAME, spec=SPAWN_SPEC, dangerous=True, kind="spawn"))
         return out
@@ -83,6 +116,8 @@ class ToolRegistry:
         on_output: Callable[[str], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> tuple[bool, str]:
+        if name == TODO_NAME:
+            return False, "todo_write is handled by the turn runner"
         if name == SPAWN_NAME:
             if self._spawn is None:
                 return False, "spawn_agent is not available"

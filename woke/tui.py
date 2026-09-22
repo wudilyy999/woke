@@ -28,6 +28,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("/rewind", "fork from an earlier user message"),
     ("/fork", "copy this session and keep going"),
     ("/new", "start a new conversation"),
+    ("/plan", "toggle plan mode (read-only)"),
     ("/help", "keyboard shortcuts"),
     ("/clear", "new session in this workspace"),
     ("/permission", "readonly / ask / edits / auto"),
@@ -47,6 +48,7 @@ HELP = """/            command picker
 /rewind      fork from an earlier user turn (Esc Esc)
 /fork        copy this session
 /new         start a new conversation
+/plan        toggle plan mode; planning turns stay read-only
 /help        this list
 /clear       new session
 /permission  readonly | ask | edits | auto
@@ -227,6 +229,12 @@ def transcript_lines(events: list[Event], width: int) -> list[tuple[str, str]]:
             add("ok" if decision == "allow" else "err", f"  {decision}")
         elif event.kind == "compaction.applied":
             add("dim", f"  compacted seq {event.payload.get('from_seq')}-{event.payload.get('to_seq')}")
+        elif event.kind == "todo.updated":
+            add("dim", "tasks")
+            for item in event.payload.get("items") or []:
+                status = item.get("status")
+                mark = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]"}.get(status, "[ ]")
+                add("dim" if status == "completed" else "default", f"  {mark} {item.get('text')}")
         elif event.kind == "turn.terminated" and event.payload.get("status") != "completed":
             add("err", f"  turn {event.payload.get('status')}")
             if event.payload.get("error"):
@@ -317,14 +325,16 @@ def status_line(
     tick: int = 0,
     phase: str = "",
     perm: str = "",
+    plan: bool = False,
 ) -> str:
     tokens = estimate_tokens(project_messages(events))
     left = max(0, 100 - int(tokens * 100 / max(budget, 1)))
     perm_label = perm or ("auto" if yes else "ask")
+    access = "plan" if plan else f"perm:{perm_label}"
     if busy or phase:
         act = activity_line(events, True, tick, phase) or f"{spinner_frame(tick)}  working"
-        return f"{left}% context left  {model}  perm:{perm_label}  {act}  / commands"
-    return f"{left}% context left  {model}  perm:{perm_label}  / commands"
+        return f"{left}% context left  {model}  {access}  {act}  / commands"
+    return f"{left}% context left  {model}  {access}  / commands"
 
 
 def pending_call(events: list[Event]) -> tuple[str, str] | None:
@@ -424,6 +434,7 @@ class Tui:
         self.error: str | None = None
         self.help = False
         self.notice: str | None = None
+        self.plan_mode = False
         self.live_text = ""
         self.live_tool_output = ""
         self.picker: str | None = None  # slash | models | workspace | permission
@@ -455,6 +466,7 @@ class Tui:
                 text,
                 on_delta=self._append_delta,
                 on_tool_output=self._append_tool_output,
+                mode="plan" if self.plan_mode else "execute",
             ),
         )
 
@@ -570,6 +582,12 @@ class Tui:
             new_id = self.host.fork_session(self.session_id)
             self.session_id = new_id
             self.notice = f"forked {new_id[:8]}  (original kept; files unchanged)"
+            self.picker = None
+            self.input = ""
+            return True
+        if cmd == "/plan":
+            self.plan_mode = not self.plan_mode
+            self.notice = "plan mode on (read-only)" if self.plan_mode else "plan mode off"
             self.picker = None
             self.input = ""
             return True
@@ -1025,6 +1043,7 @@ class Tui:
                 self.tick,
                 getattr(self.host, "phase", ""),
                 self.perm_mode,
+                self.plan_mode,
             ),
             styles["dim"],
         )
