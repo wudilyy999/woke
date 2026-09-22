@@ -130,6 +130,8 @@ The Host reads `<root>/mcp.json` (`mcpServers` map, same shape as Claude/Codex c
 
 `spawn_agent` is a dangerous builtin. It creates a child session (`session.created.parent_session_id`) in the same workspace, runs one turn with auto-allow, and returns a digest. The child has its own log. Depth is capped at 1 (the child cannot spawn). This is a nested Engine, not a second Host.
 
+Approved calls of one model reply are dispatched together. A batch made only of read-only tools and `spawn_agent` runs on a thread pool, so several sub-agents work at once; any batch containing a write or shell call keeps its order and runs one call at a time.
+
 ## TUI
 
 `woke` with no subcommand opens a Codex-style terminal: welcome card, scrolling transcript, bottom `›` composer, cyan status line, magenta brand, slash commands (`/help` `/quit` `/clear` `/yes` `/compact`). Colors follow Codex's published TUI style notes. The TUI is a client of Host; it does not own the log.

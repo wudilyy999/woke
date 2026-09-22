@@ -66,7 +66,7 @@ Pre-approve narrow calls in `.woke/permissions.json` (`{"allow": [{"tool": "run_
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
 
-The suite covers: closed event schema, path containment, a full fake-model turn, crash-after-`tool.call` without re-execution (in-process and subprocess), compaction that shortens the prompt without deleting history, permission deny, Host HTTP token, MCP stdio echo, nested `spawn_agent`, and Codex-style TUI rendering.
+The suite covers: closed event schema, path containment, a full fake-model turn, crash-after-`tool.call` without re-execution (in-process and subprocess), compaction that shortens the prompt without deleting history, permission deny, Host HTTP token, MCP stdio echo, nested `spawn_agent`, parallel read/sub-agent batches, and Codex-style TUI rendering.
 
 ## License
 

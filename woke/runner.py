@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -32,6 +33,9 @@ from woke.tools import cap_output
 MAX_STEPS = 20
 DEFAULT_BUDGET = 32_000
 MAX_COMPACT_ROUNDS = 4
+PARALLEL_SAFE = frozenset(
+    {"read_file", "list_dir", "grep", "memory_read", "web_fetch", "web_search", SPAWN_NAME}
+)
 
 SYSTEM = """You are woke, a coding agent.
 The workspace is {workspace}.
@@ -40,6 +44,7 @@ The event log is durable; do not claim work is done unless a tool result shows i
 If a tool fails, read the error and try a different approach. Do not repeat the same failing call.
 Use memory_read/memory_write for notes that should survive compaction (.woke/memory.md).
 MCP tools are named mcp__<server>__<tool>. spawn_agent runs a nested agent with its own session log; do not nest further.
+Independent calls in one reply run together, so batch parallel reads and subagents into a single reply.
 """
 
 PLAN_MODE = """
@@ -394,6 +399,7 @@ class Engine:
         workspace = Path(workspace_of(events))
         grants = session_grants(events)
         rules = load_rules(workspace)
+        pending: list[tuple[str, str, dict[str, Any]]] = []
         for call in model_event.payload.get("tool_calls") or []:
             if not isinstance(call, dict):
                 continue
@@ -488,27 +494,9 @@ class Engine:
                         run_id=run_id,
                     )
                     continue
-            try:
-                self._phase(f"running {name}")
-                if name == TODO_NAME:
-                    ok, output = self._todo(session_id, arguments, turn_id, run_id)
-                elif name == SPAWN_NAME:
-                    ok, output = self._spawn(session_id, arguments, workspace)
-                else:
-                    ok, output = self.registry.execute(
-                        name,
-                        arguments,
-                        workspace,
-                        on_output=self.on_tool_output,
-                        should_cancel=self.should_cancel,
-                    )
-            except ToolCancelled:
-                ok, output = False, "cancelled"
-            except SimulatedCrash:
-                raise
-            except Exception as exc:
-                ok, output = False, f"{type(exc).__name__}: {exc}"
-            self._phase("thinking")
+            pending.append((call_id, name, arguments))
+        results = self._run_tools(session_id, turn_id, run_id, pending, workspace)
+        for (call_id, name, _arguments), (ok, output, diff) in zip(pending, results):
             output, truncated = cap_output(output)
             payload: dict[str, Any] = {
                 "id": call_id,
@@ -520,19 +508,78 @@ class Engine:
                 payload["truncated"] = True
             if not ok:
                 payload["error"] = output
-            if name in {"write_file", "str_replace"} and ok:
-                before = next(
-                    event.payload.get("before")
-                    for event in reversed(self.store.read_session(session_id))
-                    if event.kind == "tool.call" and event.payload.get("id") == call_id
-                )
-                payload["diff"] = unified_diff(
-                    str(arguments["path"]), before, snapshot_before(workspace, str(arguments["path"]))
-                )
+            if diff is not None:
+                payload["diff"] = diff
             self.emit(session_id, "tool.result", payload, turn_id=turn_id, run_id=run_id)
             if self.should_cancel():
                 return self._cancel(session_id, turn_id, run_id)
         return None
+
+    def _run_tools(
+        self,
+        session_id: str,
+        turn_id: str,
+        run_id: str,
+        pending: list[tuple[str, str, dict[str, Any]]],
+        workspace: Path,
+    ) -> list[tuple[bool, str, str | None]]:
+        """Run the approved calls. Read-only batches go wide, the rest keep their order."""
+        if len(pending) > 1 and all(name in PARALLEL_SAFE for _, name, _ in pending):
+            with ThreadPoolExecutor(max_workers=len(pending)) as pool:
+                futures = [
+                    pool.submit(
+                        self._execute_tool, session_id, turn_id, run_id, call_id, name, arguments, workspace
+                    )
+                    for call_id, name, arguments in pending
+                ]
+                return [future.result() for future in futures]
+        return [
+            self._execute_tool(session_id, turn_id, run_id, call_id, name, arguments, workspace)
+            for call_id, name, arguments in pending
+        ]
+
+    def _execute_tool(
+        self,
+        session_id: str,
+        turn_id: str,
+        run_id: str,
+        call_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        workspace: Path,
+    ) -> tuple[bool, str, str | None]:
+        try:
+            self._phase(f"running {name}")
+            if name == TODO_NAME:
+                ok, output = self._todo(session_id, arguments, turn_id, run_id)
+            elif name == SPAWN_NAME:
+                ok, output = self._spawn(session_id, arguments, workspace)
+            else:
+                ok, output = self.registry.execute(
+                    name,
+                    arguments,
+                    workspace,
+                    on_output=self.on_tool_output,
+                    should_cancel=self.should_cancel,
+                )
+        except ToolCancelled:
+            ok, output = False, "cancelled"
+        except SimulatedCrash:
+            raise
+        except Exception as exc:
+            ok, output = False, f"{type(exc).__name__}: {exc}"
+        self._phase("thinking")
+        diff = None
+        if ok and name in {"write_file", "str_replace"}:
+            before = next(
+                event.payload.get("before")
+                for event in reversed(self.store.read_session(session_id))
+                if event.kind == "tool.call" and event.payload.get("id") == call_id
+            )
+            diff = unified_diff(
+                str(arguments["path"]), before, snapshot_before(workspace, str(arguments["path"]))
+            )
+        return ok, output, diff
 
     def _spawn(self, parent_id: str, arguments: dict[str, Any], workspace: Path) -> tuple[bool, str]:
         if self.depth >= MAX_SPAWN_DEPTH:
