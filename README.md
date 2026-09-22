@@ -41,6 +41,8 @@ python3 -m woke --root /tmp/woke-demo host stop
 
 `search` reads every session transcript in the root. `/resume <text>` in the TUI searches transcripts too, so you can find an older session by something the agent said rather than by its title.
 
+Editors and scripts drive the same Host: `woke send --background SESSION "..."` returns immediately, and `woke events SESSION --follow` prints the turn as it happens. In Python, `from woke.host import HostClient` gives you `start_turn`, `stream_events`, `decide_permission`, `cancel_turn` and `search_sessions`; every other language can POST `/sessions/{id}/turns` with `"background": true` and read `GET /sessions/{id}/events/stream` as server-sent events.
+
 MCP servers (optional) go in `<root>/mcp.json`:
 
 ```json

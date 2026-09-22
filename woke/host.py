@@ -7,7 +7,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import parse_qs, quote, urlparse
 
 from woke.errors import AuthError, HostDown, NotFound, SessionBusy, WokeError
@@ -411,6 +411,7 @@ class Host:
         if running is not None:
             running.set()
             return True
+
         with self._lock_for(session_id):
             with self._meta_lock:
                 running = (
@@ -441,6 +442,54 @@ class Host:
                 turn_id=turn_id,
             )
             return True
+
+    def start_turn_background(
+        self,
+        session_id: str,
+        text: str,
+        yes: bool = False,
+        mode: str = "execute",
+        images: list[str] | None = None,
+    ) -> None:
+        """Start a turn on a worker thread so a client can follow the events live."""
+        self.get_session(session_id)
+        if open_turn_id(self.store.read_session(session_id)):
+            raise SessionBusy(f"session {session_id} already has an open turn")
+        threading.Thread(
+            target=self._background_turn,
+            args=(session_id, text),
+            kwargs={"yes": yes, "mode": mode, "images": images},
+            name=f"woke-turn-{session_id[:8]}",
+            daemon=True,
+        ).start()
+
+    def _background_turn(self, session_id: str, text: str, **kwargs: Any) -> None:
+        try:
+            self.run_turn(session_id, text, **kwargs)
+        except Exception as exc:
+            self._fail_open_turn(session_id, f"{type(exc).__name__}: {exc}")
+
+    def _fail_open_turn(self, session_id: str, error: str) -> None:
+        with self._lock_for(session_id):
+            events = self.store.read_session(session_id)
+            turn_id = open_turn_id(events)
+            if turn_id is None:
+                return
+            run_id = open_run_id(events, turn_id)
+            if run_id is not None:
+                self.store.append(
+                    session_id,
+                    "run.terminated",
+                    {"status": "failed", "error": error},
+                    turn_id=turn_id,
+                    run_id=run_id,
+                )
+            self.store.append(
+                session_id,
+                "turn.terminated",
+                {"status": "failed", "error": error},
+                turn_id=turn_id,
+            )
 
     def compact(self, session_id: str, force: bool = True) -> Event | None:
         self.get_session(session_id)
@@ -586,6 +635,46 @@ class HostClient:
         data = self._request("POST", f"/sessions/{session_id}/cancel", {})
         return bool(data.get("cancelled"))
 
+    def start_turn(
+        self,
+        session_id: str,
+        text: str,
+        yes: bool = False,
+        mode: str = "execute",
+        images: list[str] | None = None,
+    ) -> None:
+        """Start the turn and return at once; follow it with stream_events()."""
+        self._request(
+            "POST",
+            f"/sessions/{session_id}/turns",
+            {
+                "text": text,
+                "yes": yes,
+                "mode": mode,
+                "images": list(images or []),
+                "background": True,
+            },
+        )
+
+    def stream_events(self, session_id: str, after: int = 0) -> Iterator[Event]:
+        """Yield events as the Host appends them, stopping at turn.terminated."""
+        import urllib.request
+
+        request = urllib.request.Request(
+            self.base + f"/sessions/{session_id}/events/stream?after={after}",
+            method="GET",
+            headers={"X-Woke-Token": self.token, "Accept": "text/event-stream"},
+        )
+        with urllib.request.urlopen(request, timeout=None) as response:
+            data: list[str] = []
+            for raw in response:
+                line = raw.decode("utf-8").rstrip("\r\n")
+                if line.startswith("data:"):
+                    data.append(line[5:].strip())
+                elif not line and data:
+                    yield Event(**json.loads("\n".join(data)))
+                    data = []
+
     def decide_permission(self, session_id: str, call_id: str, decision: str, scope: str = "once") -> TurnOutcome:
         return _outcome_from_json(
             self._request(
@@ -665,6 +754,14 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
                     after = int((query.get("after") or ["0"])[0])
                     events = [event.to_dict() for event in host.events(parts[1], after=after)]
                     return self._json(200, {"events": events})
+                if (
+                    len(parts) == 4
+                    and parts[0] == "sessions"
+                    and parts[2] == "events"
+                    and parts[3] == "stream"
+                ):
+                    after = int((query.get("after") or ["0"])[0])
+                    return self._stream(host, parts[1], after)
                 self._json(404, {"error": "not found"})
             except Exception as exc:
                 self._handle_error(exc)
@@ -695,6 +792,11 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
                     if not isinstance(raw_images, list):
                         raise WokeError("images must be a list")
                     images = [str(item) for item in raw_images]
+                    if body.get("background"):
+                        host.start_turn_background(
+                            parts[1], str(body.get("text") or ""), yes=yes, mode=mode, images=images
+                        )
+                        return self._json(202, {"status": "running", "session_id": parts[1]})
                     outcome = host.run_turn(
                         parts[1], str(body.get("text") or ""), yes=yes, mode=mode, images=images
                     )
@@ -732,6 +834,27 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
 
             if not hmac.compare_digest(got, host.meta["token"]):
                 raise AuthError("bad token")
+
+        def _stream(self, host: Host, session_id: str, after: int) -> None:
+            """Server-sent events until the followed turn terminates."""
+            host.get_session(session_id)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            while True:
+                for event in host.events(session_id, after=after):
+                    after = event.seq
+                    frame = f"event: {event.kind}\ndata: {json.dumps(event.to_dict(), ensure_ascii=False)}\n\n"
+                    try:
+                        self.wfile.write(frame.encode("utf-8"))
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+                    if event.kind == "turn.terminated":
+                        return
+                time.sleep(0.05)
 
         def _path(self) -> tuple[list[str], dict[str, list[str]]]:
             parsed = urlparse(self.path)

@@ -120,6 +120,8 @@ Loopback HTTP, shared token (`X-Woke-Token` or `Authorization: Bearer`). JSON re
 
 `GET /search?q=` reads `user.message` and `model.message` bodies across every session in the root and returns one hit per session with a snippet and a match count. Child sessions are omitted. The CLI wraps it as `woke search`, and `/resume <text>` in the TUI merges those hits into the session picker.
 
+`POST /sessions/{id}/turns` with `"background": true` returns `202` and runs the turn on a worker thread. `GET /sessions/{id}/events/stream?after=N` then delivers server-sent events as they are appended and closes on `turn.terminated`; a turn that dies outside the runner still writes a failed `run.terminated` / `turn.terminated` pair, so a follower never hangs. `HostClient.start_turn` plus `HostClient.stream_events` are the SDK for editors: import them from `woke.host`, or speak the two endpoints from any language.
+
 ## Tools
 
 Workspace is a directory on the session, not a git worktree. Paths must stay inside it. Shell `cwd` is that directory. `run_shell` and MCP servers launch under a platform sandbox: macOS uses `sandbox-exec` with a seatbelt policy, Linux uses `bwrap`. Writes are confined to the workspace plus the tmp directories; reads and network access stay open, so `git`, `pip` and `npm` keep working. A shell call fails when neither sandbox binary is present. Search is stdlib, not ripgrep.

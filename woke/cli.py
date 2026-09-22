@@ -51,10 +51,12 @@ def main(argv: list[str] | None = None) -> int:
     send_p.add_argument("--yes", action="store_true")
     send_p.add_argument("--plan", action="store_true", help="read-only planning turn")
     send_p.add_argument("--image", action="append", default=[], help="attach an image file")
+    send_p.add_argument("--background", action="store_true", help="start the turn and return")
 
     ev_p = sub.add_parser("events", help="print the session log")
     ev_p.add_argument("session")
     ev_p.add_argument("--after", type=int, default=0)
+    ev_p.add_argument("--follow", action="store_true", help="stream until the turn ends")
 
     compact_p = sub.add_parser("compact", help="force a compaction event")
     compact_p.add_argument("session")
@@ -224,15 +226,18 @@ def _cmd_session(root: Path, args: argparse.Namespace) -> int:
 
 
 def _cmd_send(root: Path, args: argparse.Namespace) -> int:
-    data = _client(root).post(
-        f"/sessions/{args.session}/turns",
-        {
-            "text": args.text,
-            "yes": bool(args.yes),
-            "mode": "plan" if args.plan else "execute",
-            "images": args.image,
-        },
-    )
+    body = {
+        "text": args.text,
+        "yes": bool(args.yes),
+        "mode": "plan" if args.plan else "execute",
+        "images": args.image,
+    }
+    if args.background:
+        body["background"] = True
+        _client(root).post(f"/sessions/{args.session}/turns", body)
+        print(f"running  {args.session}")
+        return 0
+    data = _client(root).post(f"/sessions/{args.session}/turns", body)
     _print_events(data.get("events") or [])
     status = data.get("status")
     if status == "paused":
@@ -245,6 +250,12 @@ def _cmd_send(root: Path, args: argparse.Namespace) -> int:
 
 
 def _cmd_events(root: Path, args: argparse.Namespace) -> int:
+    if args.follow:
+        from woke.host import HostClient
+
+        for event in HostClient(root).stream_events(args.session, after=args.after):
+            _print_events([event.to_dict()])
+        return 0
     data = _client(root).get(f"/sessions/{args.session}/events?after={args.after}")
     _print_events(data.get("events") or [])
     return 0
