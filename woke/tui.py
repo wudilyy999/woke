@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from woke.commands import expand_command, load_commands
 from woke.events import Event
 from woke.host import Host, HostClient
 from woke.errors import HostLocked
@@ -58,6 +59,7 @@ HELP = """/            command picker
 /readonly    deny writes and shell
 /compact     compact context
 /quit        exit
+custom       .woke/commands/<name>.md becomes /<name>
 y / a / n    allow once / session / deny
 Esc          close picker
 """
@@ -157,11 +159,14 @@ def wrap_text(text: str, width: int) -> list[str]:
     return lines or [""]
 
 
-def filter_slash(prefix: str) -> list[tuple[str, str]]:
+def filter_slash(prefix: str, custom: dict[str, str] | None = None) -> list[tuple[str, str]]:
     needle = prefix.strip().lower()
+    items = list(COMMANDS)
+    for name in sorted(custom or {}):
+        items.append((f"/{name}", "custom command"))
     if needle == "/":
-        return list(COMMANDS)
-    return [item for item in COMMANDS if item[0].startswith(needle)]
+        return items
+    return [item for item in items if item[0].startswith(needle)]
 
 
 def _short(value: Any, limit: int = 80) -> str:
@@ -443,6 +448,8 @@ class Tui:
         self._esc_armed = False
         self._lock = threading.Lock()
         self._color = {}
+        self.custom_commands: dict[str, str] = {}
+        self.reload_commands()
 
     @property
     def model_name(self) -> str:
@@ -453,6 +460,9 @@ class Tui:
 
     def workspace(self) -> str:
         return str(self.host.get_session(self.session_id)["workspace"])
+
+    def reload_commands(self) -> None:
+        self.custom_commands = load_commands(Path(self.workspace()))
 
     def send(self, text: str) -> None:
         if self.busy or not text.strip():
@@ -516,7 +526,10 @@ class Tui:
         )
 
     def slash_items(self) -> list[tuple[str, str]]:
-        return filter_slash(self.input if self.input.startswith("/") else "/")
+        return filter_slash(
+            self.input if self.input.startswith("/") else "/",
+            self.custom_commands,
+        )
 
     def model_items(self) -> list[tuple[str, str]]:
         rows = _model_rows()
@@ -630,6 +643,11 @@ class Tui:
                 self.menu_index = 0
                 return True
             return self._set_workspace(parts[1].strip())
+        template = self.custom_commands.get(cmd.lstrip("/"))
+        if template is not None:
+            arguments = raw.strip()[len(cmd) :].strip()
+            self.send(expand_command(template, arguments))
+            return True
         self.error = f"unknown command {cmd}"
         return True
 
@@ -666,6 +684,7 @@ class Tui:
             self.error = f"not a directory: {path}"
             return True
         self.session_id = self.host.create_session(str(target))
+        self.reload_commands()
         self.notice = f"new session in {target}"
         self.error = None
         self.picker = None
@@ -675,6 +694,7 @@ class Tui:
 
     def _new_session(self) -> bool:
         self.session_id = self.host.create_session(self.workspace())
+        self.reload_commands()
         self.notice = "new conversation"
         self.picker = None
         self.input = ""
@@ -694,6 +714,7 @@ class Tui:
             return True
         item = matches[0]
         self.session_id = item["id"]
+        self.reload_commands()
         self.notice = f"resumed {item['id'][:8]}  {item['title']}"
         self.picker = None
         self.input = ""
