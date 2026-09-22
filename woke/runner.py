@@ -11,7 +11,7 @@ from woke.events import Event, TODO_STATUSES
 from woke.files import expand_mentions, snapshot_before, unified_diff
 from woke.memory import load_briefing
 from woke.model import Model, ModelReply
-from woke.policy import Policy
+from woke.policy import Policy, load_rules
 from woke.projection import (
     call_ids,
     compact_cut_seq,
@@ -391,6 +391,7 @@ class Engine:
         written_calls = call_ids(events, turn_id)
         workspace = Path(workspace_of(events))
         grants = session_grants(events)
+        rules = load_rules(workspace)
         for call in model_event.payload.get("tool_calls") or []:
             if not isinstance(call, dict):
                 continue
@@ -451,6 +452,8 @@ class Engine:
                     )
                 if decided is None:
                     decision = self.policy.decide(name, arguments, grants=grants)
+                    if decision == "wait" and rules.allow(name, arguments):
+                        decision = "allow"
                     source = "grant" if decision == "allow" and name in grants else "policy"
                     if decision == "wait":
                         return TurnOutcome(status="paused", pending_call_id=call_id)

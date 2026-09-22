@@ -58,6 +58,8 @@ export WOKE_API_BASE=https://api.openai.com/v1   # optional
 
 Workspace memory: put notes in `AGENTS.md` or `.woke/memory.md`; the agent can also call `memory_write`.
 
+Pre-approve narrow calls in `.woke/permissions.json` (`{"allow": [{"tool": "run_shell", "match": "git *"}]}`), and add prompt templates under `.woke/commands/` to expose them as `/<name>`.
+
 ## Tests
 
 ```sh

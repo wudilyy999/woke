@@ -87,7 +87,7 @@ Token estimate is `chars/4` (not a tokenizer). Default budget 32_000.
 
 ## Permissions
 
-Dangerous: `write_file`, `str_replace`, `run_shell`, `spawn_agent`, non-readonly MCP. Reads, grep, and `memory_write` are not gated.
+Dangerous: `write_file`, `str_replace`, `run_shell`, `spawn_agent`, `web_fetch`, `web_search`, non-readonly MCP. Reads, grep, `todo_write`, and `memory_write` are not gated.
 
 Four levels (`/permission`):
 
@@ -99,6 +99,14 @@ Four levels (`/permission`):
 | `auto` | auto-allow | auto-allow |
 
 `--yes` starts in `auto`. While asking: `y` this call, `a` this tool for the session, `n` deny. Session grants still apply on top of the mode. Path containment always holds.
+
+A workspace can pre-approve narrow calls in `.woke/permissions.json`:
+
+```json
+{"allow": [{"tool": "run_shell", "match": "git *"}]}
+```
+
+The pattern matches the tool's primary argument (`command` for `run_shell`, `path` for file tools, `url` for `web_fetch`, `query` for `web_search`), or the JSON-encoded arguments for any other tool. A rule turns `wait` into `allow`; `readonly` still denies and `auto` already allows. A malformed file fails the turn loudly instead of being ignored.
 
 ## Errors
 
