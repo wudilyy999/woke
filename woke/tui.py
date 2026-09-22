@@ -266,6 +266,12 @@ def transcript_lines(events: list[Event], width: int) -> list[tuple[str, str]]:
                 status = item.get("status")
                 mark = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]"}.get(status, "[ ]")
                 add("dim" if status == "completed" else "default", f"  {mark} {item.get('text')}")
+        elif event.kind == "hook.result":
+            ok = bool(event.payload.get("ok"))
+            body = str(event.payload.get("output") or "")
+            if body or not ok:
+                label = f"  hook {event.payload.get('event')} {body}"
+                add("dim" if ok else "err", _short(label, inner))
         elif event.kind == "turn.terminated" and event.payload.get("status") != "completed":
             add("err", f"  turn {event.payload.get('status')}")
             if event.payload.get("error"):

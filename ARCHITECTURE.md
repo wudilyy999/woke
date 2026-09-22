@@ -126,6 +126,10 @@ Workspace is a directory on the session, not a git worktree. Paths must stay ins
 
 `run_shell` streams its output line by line to the caller and stops the process when the turn is cancelled. `web_fetch` returns the text of an http(s) URL; `web_search` queries DuckDuckGo lite and returns titles, links and snippets. Both network tools are dangerous, so they pass through the permission gate.
 
+## Hooks
+
+`.woke/hooks.json` holds `{"hooks": [{"event": ..., "match": ..., "command": ...}]}`. Events are `PreToolUse`, `PostToolUse`, and `TurnEnd`; snake_case spellings work too. The command runs through `sh` in the workspace with `cwd` set there and gets one JSON payload on stdin: `tool` and `arguments`, plus `ok` and the tail of the output for `PostToolUse`. A non-zero exit from `PreToolUse` blocks the tool and its stderr becomes the tool error; `PostToolUse` stdout is appended to the tool result; `TurnEnd` carries the final status, which is where completion notifications belong. Every run lands in the log as a `hook.result` event.
+
 ## MCP
 
 The Host reads `<root>/mcp.json` (`mcpServers` map, same shape as Claude/Codex config). Each server is a stdio JSON-RPC process with LSP `Content-Length` framing. Tools are registered as `mcp__<server>__<tool>` and executed as ordinary `tool.call` / `tool.result` events. Read-only MCP tools skip the permission gate; others are dangerous.

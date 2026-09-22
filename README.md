@@ -68,13 +68,27 @@ Workspace memory: put notes in `AGENTS.md` or `.woke/memory.md`; the agent can a
 
 Pre-approve narrow calls in `.woke/permissions.json` (`{"allow": [{"tool": "run_shell", "match": "git *"}]}`), and add prompt templates under `.woke/commands/` to expose them as `/<name>`.
 
+Hooks go in `.woke/hooks.json`. `PreToolUse` can veto a call, `PostToolUse` can add feedback to the tool result, and `TurnEnd` runs when the turn stops:
+
+```json
+{
+  "hooks": [
+    { "event": "PreToolUse", "match": "run_shell", "command": "if grep -q 'rm -rf'; then echo 'rm -rf is not allowed here' >&2; exit 2; fi" },
+    { "event": "PostToolUse", "match": "write_file", "command": "npx prettier --write \"$(jq -r .arguments.path)\"" },
+    { "event": "TurnEnd", "command": "osascript -e 'display notification \"turn finished\"'" }
+  ]
+}
+```
+
+Each hook receives the call as JSON on stdin and runs in the workspace.
+
 ## Tests
 
 ```sh
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
 
-The suite covers: closed event schema, path containment, a full fake-model turn, crash-after-`tool.call` without re-execution (in-process and subprocess), compaction that shortens the prompt without deleting history, permission deny, Host HTTP token, MCP stdio echo, nested `spawn_agent`, parallel read/sub-agent batches, and Codex-style TUI rendering.
+The suite covers: closed event schema, path containment, a full fake-model turn, crash-after-`tool.call` without re-execution (in-process and subprocess), compaction that shortens the prompt without deleting history, permission deny, Host HTTP token, MCP stdio echo, MCP resources/prompts over stdio and streamable HTTP, nested `spawn_agent`, parallel read/sub-agent batches, image attachments, cross-session search, hooks, and Codex-style TUI rendering.
 
 ## License
 

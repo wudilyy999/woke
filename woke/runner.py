@@ -10,6 +10,7 @@ from typing import Any, Callable
 from woke.errors import SimulatedCrash, ToolCancelled, TurnCancelled
 from woke.events import Event, TODO_STATUSES
 from woke.files import expand_images, expand_mentions, mention_images, snapshot_before, unified_diff
+from woke.hooks import EVENT_NAMES, Hook, load_hooks, matching, run_hook
 from woke.memory import load_briefing
 from woke.model import Model, ModelReply
 from woke.policy import Policy, load_rules
@@ -338,6 +339,7 @@ class Engine:
                 reply = ModelReply(text="(empty model response)")
             self._emit_model(session_id, turn_id, run_id, reply)
             if not reply.tool_calls:
+                self._hooks(session_id, turn_id, run_id, "turnend", {"status": "completed"})
                 self.emit(
                     session_id,
                     "run.terminated",
@@ -358,6 +360,7 @@ class Engine:
         return self._fail(session_id, turn_id, run_id, "max_steps")
 
     def _fail(self, session_id: str, turn_id: str, run_id: str, error: str) -> TurnOutcome:
+        self._hooks(session_id, turn_id, run_id, "turnend", {"status": "failed", "error": error})
         self.emit(
             session_id,
             "run.terminated",
@@ -374,6 +377,7 @@ class Engine:
         return TurnOutcome(status="failed", error=error)
 
     def _cancel(self, session_id: str, turn_id: str, run_id: str) -> TurnOutcome:
+        self._hooks(session_id, turn_id, run_id, "turnend", {"status": "cancelled"})
         self.emit(
             session_id,
             "run.terminated",
@@ -559,6 +563,16 @@ class Engine:
         arguments: dict[str, Any],
         workspace: Path,
     ) -> tuple[bool, str, str | None]:
+        blocked = self._hooks(
+            session_id,
+            turn_id,
+            run_id,
+            "pretooluse",
+            {"tool": name, "arguments": arguments},
+            tool=name,
+        )
+        if blocked:
+            return False, "blocked by hook: " + "; ".join(blocked), None
         try:
             self._phase(f"running {name}")
             if name == TODO_NAME:
@@ -580,6 +594,16 @@ class Engine:
         except Exception as exc:
             ok, output = False, f"{type(exc).__name__}: {exc}"
         self._phase("thinking")
+        notes = self._hooks(
+            session_id,
+            turn_id,
+            run_id,
+            "posttooluse",
+            {"tool": name, "arguments": arguments, "ok": ok, "output": output[-4000:]},
+            tool=name,
+        )
+        if notes:
+            output = output + "\n\n" + "\n".join(notes)
         diff = None
         if ok and name in {"write_file", "str_replace"}:
             before = next(
@@ -591,6 +615,37 @@ class Engine:
                 str(arguments["path"]), before, snapshot_before(workspace, str(arguments["path"]))
             )
         return ok, output, diff
+
+    def _hooks(
+        self,
+        session_id: str,
+        turn_id: str,
+        run_id: str,
+        event: str,
+        payload: dict[str, Any],
+        tool: str = "",
+    ) -> list[str]:
+        """Run matching hooks, log each result, and return the failed or noisy ones."""
+        workspace = Path(workspace_of(self.store.read_session(session_id)))
+        body = {"session_id": session_id, "turn_id": turn_id, **payload}
+        texts: list[str] = []
+        for hook in matching(load_hooks(workspace), event, tool):
+            ok, text = run_hook(hook, body, workspace)
+            self.emit(
+                session_id,
+                "hook.result",
+                {
+                    "event": EVENT_NAMES[event],
+                    "command": hook.command,
+                    "ok": ok,
+                    "output": text,
+                },
+                turn_id=turn_id,
+                run_id=run_id,
+            )
+            if not ok or (event == "posttooluse" and text):
+                texts.append(text)
+        return texts
 
     def _spawn(self, parent_id: str, arguments: dict[str, Any], workspace: Path) -> tuple[bool, str]:
         if self.depth >= MAX_SPAWN_DEPTH:

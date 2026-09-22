@@ -20,6 +20,7 @@ KINDS = frozenset(
         "permission.decided",
         "compaction.applied",
         "todo.updated",
+        "hook.result",
     }
 )
 
@@ -46,6 +47,7 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
     "permission.decided": ("id", "decision", "source"),
     "compaction.applied": ("summary", "from_seq", "to_seq"),
     "todo.updated": ("items",),
+    "hook.result": ("event", "command", "ok"),
 }
 
 
@@ -87,6 +89,7 @@ def validate_event(
         "permission.requested",
         "permission.decided",
         "todo.updated",
+        "hook.result",
     }:
         if not run_id:
             raise ValidationError(f"{kind} requires run_id")
@@ -159,6 +162,13 @@ def validate_event(
             _require_str(item, "text")
             if item.get("status") not in TODO_STATUSES:
                 raise ValidationError(f"bad todo status: {item.get('status')}")
+    elif kind == "hook.result":
+        _require_str(payload, "event")
+        _require_str(payload, "command")
+        if not isinstance(payload["ok"], bool):
+            raise ValidationError("hook.result ok must be a bool")
+        if "output" in payload and not isinstance(payload["output"], str):
+            raise ValidationError("hook.result output must be a string")
 
 
 def _require_str(payload: dict[str, Any], key: str) -> None:
