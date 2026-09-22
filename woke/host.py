@@ -8,7 +8,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from woke.errors import AuthError, HostDown, NotFound, SessionBusy, WokeError
 from woke.events import Event
@@ -204,6 +204,19 @@ class Host:
     def list_root_sessions(self) -> list[dict[str, Any]]:
         items = [item for item in self.list_sessions() if not item.get("parent_session_id")]
         return list(reversed(items))
+
+    def search_sessions(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Sessions whose transcript mentions this text, newest hit first."""
+        out: list[dict[str, Any]] = []
+        for hit in self.store.search(query, limit=limit):
+            info = self.get_session(hit["session_id"])
+            if info.get("parent_session_id"):
+                continue
+            info["snippet"] = hit["snippet"]
+            info["matches"] = hit["matches"]
+            info["match_seq"] = hit["seq"]
+            out.append(info)
+        return out
 
     def rewind_targets(self, session_id: str) -> list[dict[str, Any]]:
         """User turns that can be forked, newest first."""
@@ -499,6 +512,9 @@ class HostClient:
     def list_root_sessions(self) -> list[dict[str, Any]]:
         return list(reversed([item for item in self.list_sessions() if not item.get("parent_session_id")]))
 
+    def search_sessions(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        return self._request("GET", f"/search?q={quote(query)}&limit={limit}")["sessions"]
+
     def session_for_workspace(self, workspace: str) -> str:
         path = str(Path(workspace).expanduser().resolve())
         for item in self.list_root_sessions():
@@ -597,6 +613,10 @@ def _handler(host: Host) -> type[BaseHTTPRequestHandler]:
                     return self._json(200, {"ok": True, "root_id": host.meta["root_id"]})
                 if parts == ["sessions"]:
                     return self._json(200, {"sessions": host.list_sessions()})
+                if parts == ["search"]:
+                    needle = (query.get("q") or [""])[0]
+                    limit = int((query.get("limit") or ["20"])[0])
+                    return self._json(200, {"sessions": host.search_sessions(needle, limit=limit)})
                 if len(parts) == 2 and parts[0] == "sessions":
                     return self._json(200, host.get_session(parts[1]))
                 if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "events":

@@ -31,6 +31,23 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, seq);
 """
 
+SEARCH_KINDS = ("user.message", "model.message")
+
+
+def like_pattern(needle: str) -> str:
+    escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def snippet(text: str, needle: str, width: int = 60) -> str:
+    flat = " ".join(text.split())
+    index = flat.lower().find(needle.lower())
+    if index < 0:
+        return flat[: width * 2]
+    start = max(0, index - width)
+    end = min(len(flat), index + len(needle) + width)
+    return f"{'...' if start else ''}{flat[start:end]}{'...' if end < len(flat) else ''}"
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -197,6 +214,34 @@ class Store:
 
     def session_ids(self) -> list[str]:
         return [e.session_id for e in self.list_sessions()]
+
+    def search(self, text: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Transcript search across sessions, newest hit first."""
+        needle = text.strip()
+        if not needle:
+            return []
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT seq, session_id, payload FROM events "
+                "WHERE kind IN (?, ?) AND payload LIKE ? ESCAPE '\\' ORDER BY seq DESC",
+                (*SEARCH_KINDS, like_pattern(needle)),
+            ).fetchall()
+        hits: dict[str, dict[str, Any]] = {}
+        for seq, session_id, payload in rows:
+            body = str(json.loads(payload).get("text") or "")
+            if needle.lower() not in body.lower():
+                continue
+            hit = hits.setdefault(
+                session_id,
+                {
+                    "session_id": session_id,
+                    "seq": int(seq),
+                    "matches": 0,
+                    "snippet": snippet(body, needle),
+                },
+            )
+            hit["matches"] += 1
+        return sorted(hits.values(), key=lambda item: item["seq"], reverse=True)[:limit]
 
     @staticmethod
     def _row(row: tuple[Any, ...]) -> Event:

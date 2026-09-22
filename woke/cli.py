@@ -58,6 +58,10 @@ def main(argv: list[str] | None = None) -> int:
     compact_p = sub.add_parser("compact", help="force a compaction event")
     compact_p.add_argument("session")
 
+    search_p = sub.add_parser("search", help="search every session transcript")
+    search_p.add_argument("query")
+    search_p.add_argument("--limit", type=int, default=20)
+
     ap = sub.add_parser("approve")
     ap.add_argument("session")
     ap.add_argument("call_id")
@@ -94,6 +98,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_send(root, args)
         if args.cmd == "events":
             return _cmd_events(root, args)
+        if args.cmd == "search":
+            return _cmd_search(root, args)
         if args.cmd == "compact":
             data = _client(root).post(f"/sessions/{args.session}/compact", {})
             print(json.dumps(data, indent=2, ensure_ascii=False))
@@ -235,6 +241,20 @@ def _cmd_send(root: Path, args: argparse.Namespace) -> int:
 def _cmd_events(root: Path, args: argparse.Namespace) -> int:
     data = _client(root).get(f"/sessions/{args.session}/events?after={args.after}")
     _print_events(data.get("events") or [])
+    return 0
+
+
+def _cmd_search(root: Path, args: argparse.Namespace) -> int:
+    from urllib.parse import quote
+
+    data = _client(root).get(f"/search?q={quote(args.query)}&limit={args.limit}")
+    sessions = data.get("sessions") or []
+    if not sessions:
+        print(f"no session mentions {args.query!r}", file=sys.stderr)
+        return 1
+    for item in sessions:
+        print(f"{item['id']}  {item['title']}  {item['workspace']}  {item['matches']} hits")
+        print(f"      {item['snippet']}")
     return 0
 
 

@@ -25,7 +25,7 @@ from woke.projection import estimate_tokens, pending_permission_id, project_mess
 COMMANDS: list[tuple[str, str]] = [
     ("/model", "switch model"),
     ("/workspace", "switch project directory"),
-    ("/resume", "resume a previous session"),
+    ("/resume", "resume or search a previous session"),
     ("/rewind", "fork from an earlier user message"),
     ("/fork", "copy this session and keep going"),
     ("/new", "start a new conversation"),
@@ -45,7 +45,7 @@ COMMANDS: list[tuple[str, str]] = [
 HELP = """/            command picker
 /model       switch model (↑↓ then Enter)
 /workspace   switch directory (↑↓ then Enter)
-/resume      resume a previous session
+/resume      resume a previous session; text searches every transcript
 /rewind      fork from an earlier user turn (Esc Esc)
 /fork        copy this session
 /new         start a new conversation
@@ -726,6 +726,16 @@ class Tui:
             if item["id"] == token or item["id"].startswith(token)
         ]
         if not matches:
+            hits = self.host.search_sessions(token)
+            if len(hits) == 1:
+                matches = hits
+            elif hits:
+                self.picker = "sessions"
+                self.input = f"/resume {token}"
+                self.menu_index = 0
+                self.error = None
+                return True
+        if not matches:
             self.error = f"no session matching {token}"
             return True
         item = matches[0]
@@ -741,6 +751,7 @@ class Tui:
     def session_items(self) -> list[tuple[str, str]]:
         needle = self._picker_query("resume").lower()
         rows: list[tuple[str, str]] = []
+        listed: set[str] = set()
         home = str(Path.home())
         for item in self.host.list_root_sessions():
             path = item["workspace"]
@@ -752,6 +763,14 @@ class Tui:
                 continue
             mark = "*" if item["id"] == self.session_id else " "
             rows.append((item["id"], f"{mark} {label}"))
+            listed.add(item["id"])
+        if needle:
+            for hit in self.host.search_sessions(needle):
+                if hit["id"] in listed:
+                    continue
+                mark = "*" if hit["id"] == self.session_id else " "
+                label = f"{hit['id'][:8]}  {hit['title']}  {hit['matches']} hits  {hit['snippet']}"
+                rows.append((hit["id"], f"{mark} {label}"))
         return rows
 
     def rewind_items(self) -> list[tuple[str, str]]:

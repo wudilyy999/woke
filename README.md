@@ -33,8 +33,11 @@ python3 -m woke --root /tmp/woke-demo host start --detach --yes
 python3 -m woke --root /tmp/woke-demo session new --workspace /tmp/woke-ws
 python3 -m woke --root /tmp/woke-demo send <session-id> "hello" --yes
 python3 -m woke --root /tmp/woke-demo events <session-id>
+python3 -m woke --root /tmp/woke-demo search "quota"
 python3 -m woke --root /tmp/woke-demo host stop
 ```
+
+`search` reads every session transcript in the root. `/resume <text>` in the TUI searches transcripts too, so you can find an older session by something the agent said rather than by its title.
 
 MCP servers (optional) go in `<root>/mcp.json`:
 

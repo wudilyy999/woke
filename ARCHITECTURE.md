@@ -116,6 +116,8 @@ Tool exceptions become `tool.result` failures; they do not crash the Host. Missi
 
 Loopback HTTP, shared token (`X-Woke-Token` or `Authorization: Bearer`). JSON request/response. Not a remote-access product: no TLS, no multi-machine.
 
+`GET /search?q=` reads `user.message` and `model.message` bodies across every session in the root and returns one hit per session with a snippet and a match count. Child sessions are omitted. The CLI wraps it as `woke search`, and `/resume <text>` in the TUI merges those hits into the session picker.
+
 ## Tools
 
 Workspace is a directory on the session, not a git worktree. Paths must stay inside it. Shell `cwd` is that directory. `run_shell` and MCP servers launch under a platform sandbox: macOS uses `sandbox-exec` with a seatbelt policy, Linux uses `bwrap`. Writes are confined to the workspace plus the tmp directories; reads and network access stay open, so `git`, `pip` and `npm` keep working. A shell call fails when neither sandbox binary is present. Search is stdlib, not ripgrep.
